@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import re
+import shutil
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-
 
 _THREAD_ID_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
@@ -50,6 +51,7 @@ class DockerSandbox:
         cpus: float,
         pids_limit: int,
         max_output_bytes: int,
+        workspace_ttl_days: int = 7,
         docker_binary: str = "docker",
     ) -> None:
         self.image = image
@@ -60,6 +62,7 @@ class DockerSandbox:
         self.cpus = cpus
         self.pids_limit = pids_limit
         self.max_output_bytes = max_output_bytes
+        self.workspace_ttl_days = workspace_ttl_days
         self.docker_binary = docker_binary
 
         self.workspace_root.mkdir(parents=True, exist_ok=True)
@@ -86,7 +89,10 @@ class DockerSandbox:
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
-            message = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
+            message = (
+                stderr.decode(errors="replace").strip()
+                or stdout.decode(errors="replace").strip()
+            )
             raise RuntimeError(f"Docker is not available: {message}")
 
         proc = await asyncio.create_subprocess_exec(
@@ -186,7 +192,7 @@ class DockerSandbox:
 
         try:
             await asyncio.wait_for(proc.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             timed_out = True
             proc.kill()
             await proc.wait()
@@ -199,13 +205,65 @@ class DockerSandbox:
 
         duration_ms = int((time.monotonic() - started) * 1000)
         return SandboxResult(
-            exit_code=124 if timed_out else (proc.returncode or 0),
+            exit_code=self._map_exit_code(timed_out, proc.returncode),
             stdout=stdout,
             stderr=stderr,
             duration_ms=duration_ms,
             timed_out=timed_out,
             output_truncated=stdout_truncated or stderr_truncated,
         )
+
+    @staticmethod
+    def _map_exit_code(timed_out: bool, returncode: int | None) -> int:
+        if timed_out:
+            return 124
+        if returncode is None:
+            return 124  # defensive: process never finished
+        if returncode < 0:
+            # Shell convention for signal death (docker CLI killed by SIGKILL -> 137).
+            return 128 - returncode
+        return returncode
+
+    def cleanup_expired_workspaces(self, ttl_days: int | None = None) -> int:
+        """Delete thread workspaces untouched for longer than the TTL.
+
+        Returns the number of removed directories. Only immediate subdirectories
+        of workspace_root are considered; the root itself is never removed.
+        A TTL of 0 disables cleanup.
+        """
+        days = self.workspace_ttl_days if ttl_days is None else ttl_days
+        if days <= 0:
+            return 0
+
+        cutoff = time.time() - days * 86400
+        removed = 0
+        for entry in self.workspace_root.iterdir():
+            if not entry.is_dir():
+                continue
+            try:
+                if self._latest_activity(entry) >= cutoff:
+                    continue
+                shutil.rmtree(entry)
+                removed += 1
+            except OSError:
+                # Directory vanished or is mid-write by another thread; retry next cycle.
+                continue
+        return removed
+
+    @staticmethod
+    def _latest_activity(directory: Path) -> float:
+        # A directory's own mtime only moves on create/delete of direct children,
+        # so modifying a file inside would look "stale". Walk the subtree instead;
+        # workspaces are small and this runs hourly.
+        latest = directory.stat().st_mtime
+        for root, dirs, files in os.walk(directory):
+            for name in dirs + files:
+                try:
+                    mtime = os.stat(os.path.join(root, name)).st_mtime
+                except OSError:
+                    continue
+                latest = max(latest, mtime)
+        return latest
 
     async def _force_remove_container(self, container_name: str) -> None:
         proc = await asyncio.create_subprocess_exec(
@@ -218,7 +276,7 @@ class DockerSandbox:
         )
         try:
             await asyncio.wait_for(proc.wait(), timeout=5)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
 
