@@ -128,6 +128,10 @@ class DockerSandbox:
         docker_args = [
             self.docker_binary,
             "run",
+            # -i is REQUIRED: without --interactive the docker CLI never pipes
+            # stdin into the container, so `python -` sees instant EOF, runs
+            # an empty program and exits 0 with no output.
+            "-i",
             "--rm",
             "--name",
             container_name,
