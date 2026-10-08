@@ -1,21 +1,32 @@
 'use client';
 
 import { memo } from 'react';
+import 'katex/dist/katex.min.css';
 import Markdown from 'react-markdown';
+import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
 
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallRow from './ToolCallRow';
+import { normalizeBlockMath } from '@/lib/math';
 import type { ChatMessage } from '@/lib/types';
 
 type AssistantMsg = Extract<ChatMessage, { role: 'assistant' }>;
 
 // Answers only go through markdown; model text is untrusted, so raw HTML stays
 // OFF (default) and thinking prose renders as plain pre-wrap text.
+// Math: `$...$` inline, `$$...$$` block via remark-math + rehype-katex.
+// throwOnError=false keeps a bad formula visible (red) instead of crashing the
+// message; code spans/blocks are untouched by remark-math by design.
+const katexOptions = { throwOnError: false, errorColor: '#b91c1c' } as const;
+
 const MarkdownBlock = memo(function MarkdownBlock({ source }: { source: string }) {
   return (
     <div className="md-body text-[15px] leading-relaxed text-gray-900">
-      <Markdown remarkPlugins={[remarkGfm]}>{source}</Markdown>
+      <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[[rehypeKatex, katexOptions]]}>
+        {normalizeBlockMath(source)}
+      </Markdown>
     </div>
   );
 });
