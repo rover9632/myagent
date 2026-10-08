@@ -136,7 +136,34 @@ curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
   -d '{"message":"你好"}'
 ```
 
-## 7. 测试普通对话
+## 7. Web 前端（`web/`）
+
+ChatGPT 风格的 Next.js 对话页。浏览器只访问同源的 `/api/chat` 代理路由（后端未开 CORS），
+`API_TOKEN` 由 Next.js 服务端读取并注入 Bearer 头，不会进入浏览器 bundle。
+
+```bash
+cd web
+cp .env.example .env.local   # 填入与后端 .env 中 API_TOKEN 一致的值
+npm install
+npm run dev                  # 访问 http://localhost:3000
+```
+
+`.env.local` 可配置项：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `BACKEND_URL` | `http://127.0.0.1:8061` | Agent API 地址 |
+| `BACKEND_API_TOKEN` | 空 | 后端 Bearer 令牌；后端留空则这里也可留空 |
+
+特性与约定：
+
+- 会话列表/历史保存在浏览器 localStorage（`myagent.threads.v1`），清缓存即丢；后端重启对模型失忆
+- AI 回复除最后正式回答外均折叠为「深度思考」，工具调用可展开看 stdout/stderr/exit code
+- 回答支持 LaTeX：`$...$` 行内、`$$...$$` 块级（KaTeX 渲染；注意 `$` 货币符号可能被误配对）
+- 「+」附件按钮目前仅为 UI 占位，尚未接通
+- 生产构建：`npm run build && npm start`
+
+## 8. 测试普通对话
 
 ```bash
 curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
@@ -144,7 +171,7 @@ curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
   -d '{"message":"你好，请简单介绍一下你自己"}'
 ```
 
-## 8. 测试 Python 执行
+## 9. 测试 Python 执行
 
 ```bash
 curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
@@ -152,7 +179,7 @@ curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
   -d '{"message":"用 Python 计算 1 到 10000 的平方和，并告诉我结果"}'
 ```
 
-## 9. 测试 Bash
+## 10. 测试 Bash
 
 ```bash
 curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
@@ -160,7 +187,7 @@ curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
   -d '{"message":"在工作区创建 hello.txt，内容写 hello agent，然后读取它"}'
 ```
 
-## 10. 测试 Web Search
+## 11. 测试 Web Search
 
 ```bash
 curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
@@ -168,7 +195,7 @@ curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
   -d '{"message":"搜索一下 Python 当前最新稳定版本，并给出来源"}'
 ```
 
-## 11. SSE 事件格式
+## 12. SSE 事件格式
 
 服务会发送类似：
 
@@ -191,7 +218,7 @@ data: {"thread_id":"..."}
 
 前端可以分别处理：`start`、`tool_start`、`tool_end`、`token`、`error`、`done`。
 
-## 12. 对话记忆
+## 13. 对话记忆
 
 请求带相同 `thread_id` 即可复用该线程的 LangGraph checkpoint：
 
@@ -207,7 +234,7 @@ curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
 
 当前使用 `InMemorySaver`，适合 MVP / 调试。进程重启后数据会丢失；生产环境应换成 PostgreSQL checkpointer。
 
-## 13. Sandbox 安全边界
+## 14. Sandbox 安全边界
 
 当前容器默认：
 
@@ -227,7 +254,7 @@ curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
 workspace 磁盘增长由后台清理任务兜底：每小时扫描一次，删除超过
 `SANDBOX_WORKSPACE_TTL_DAYS` 天无任何文件活动的 thread workspace（设 0 关闭）。
 
-## 14. 测试
+## 15. 测试
 
 ```bash
 uv run pytest -q      # 单元 / API 测试，不需要 Docker 与外部 LLM
@@ -237,7 +264,7 @@ uv run ruff check .
 测试覆盖：SSE 端点事件框架与鉴权（401/200）、事件映射、执行工具的 JSON 契约与
 路径安全、workspace TTL 清理、退出码信号语义。测试不触碰真实 Docker 与 LLM。
 
-## 15. 生产化时优先改造
+## 16. 生产化时优先改造
 
 1. `InMemorySaver` -> PostgreSQL `AsyncPostgresSaver`
 2. 为工具增加权限策略和 Human-in-the-loop（web_search 注入指令 -> 沙箱执行是最高危路径）
