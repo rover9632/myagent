@@ -1,6 +1,5 @@
 from contextvars import ContextVar
 
-
 _current_thread_id: ContextVar[str | None] = ContextVar(
     "current_thread_id",
     default=None,

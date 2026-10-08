@@ -100,5 +100,6 @@ def build_execution_tools(sandbox: DockerSandbox):
 
 
 def _shell_quote(value: str) -> str:
-    # Avoid an extra dependency just for quoting. This is equivalent to a POSIX single-quote shell quote.
+    # Avoid an extra dependency just for quoting.
+    # This is equivalent to a POSIX single-quote shell quote.
     return "'" + value.replace("'", "'\\''") + "'"
