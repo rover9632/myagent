@@ -35,11 +35,15 @@ class Settings(BaseSettings):
     sandbox_cpus: float = Field(default=1.0, gt=0)
     sandbox_pids_limit: int = Field(default=64, ge=16)
     sandbox_max_output_bytes: int = Field(default=12000, ge=1024)
+    # Delete thread workspaces untouched for this many days; 0 disables cleanup.
+    sandbox_workspace_ttl_days: int = Field(default=7, ge=0)
 
     # FastAPI
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8061, ge=1, le=65535)
     log_level: str = Field(default="INFO")
+    # Bearer token for /v1 endpoints. Empty string disables auth (warned at startup).
+    api_token: str = Field(default="")
 
 
 @lru_cache(maxsize=1)
