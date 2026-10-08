@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
 from typing import Any
 
 from app.context import reset_thread_id, set_thread_id
-
+from app.schemas import SSEEvent
 
 _TOOL_NAMES = {
     "web_search",
@@ -53,15 +52,13 @@ class AgentService:
         *,
         thread_id: str,
         message: str,
-    ) -> AsyncIterator[dict]:
+    ) -> AsyncIterator[SSEEvent]:
         token = set_thread_id(thread_id)
         try:
-            yield {
-                "type": "start",
-                "data": {
-                    "thread_id": thread_id,
-                },
-            }
+            yield SSEEvent(
+                type="start",
+                data={"thread_id": thread_id},
+            )
 
             config = {
                 "configurable": {
@@ -87,23 +84,23 @@ class AgentService:
                     data = event.get("data") or {}
 
                     if event_name == "on_tool_start" and run_name in _TOOL_NAMES:
-                        yield {
-                            "type": "tool_start",
-                            "data": {
+                        yield SSEEvent(
+                            type="tool_start",
+                            data={
                                 "tool": run_name,
                                 "input": _truncate_value(data.get("input", {})),
                             },
-                        }
+                        )
                         continue
 
                     if event_name == "on_tool_end" and run_name in _TOOL_NAMES:
-                        yield {
-                            "type": "tool_end",
-                            "data": {
+                        yield SSEEvent(
+                            type="tool_end",
+                            data={
                                 "tool": run_name,
                                 "output": _truncate_value(data.get("output", ""), limit=4000),
                             },
-                        }
+                        )
                         continue
 
                     if event_name == "on_chat_model_stream":
@@ -111,31 +108,25 @@ class AgentService:
                         content = getattr(chunk, "content", None)
                         text = _extract_text(content)
                         if text:
-                            yield {
-                                "type": "token",
-                                "data": {
-                                    "text": text,
-                                },
-                            }
+                            yield SSEEvent(
+                                type="token",
+                                data={"text": text},
+                            )
 
                     if event_name == "on_chain_error":
                         error = data.get("error")
                         raise RuntimeError(str(error))
 
             except Exception as exc:
-                yield {
-                    "type": "error",
-                    "data": {
-                        "message": str(exc),
-                    },
-                }
+                yield SSEEvent(
+                    type="error",
+                    data={"message": str(exc)},
+                )
                 return
 
-            yield {
-                "type": "done",
-                "data": {
-                    "thread_id": thread_id,
-                },
-            }
+            yield SSEEvent(
+                type="done",
+                data={"thread_id": thread_id},
+            )
         finally:
             reset_thread_id(token)

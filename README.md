@@ -54,9 +54,12 @@ LLM_BASE_URL=http://127.0.0.1:8000/v1
 LLM_API_KEY=EMPTY
 LLM_MODEL=Qwen/Qwen3-8B
 TAVILY_API_KEY=tvly-xxxxxxxx
+API_TOKEN=your-secret-token
 ```
 
 `LLM_MODEL` 必须与 vLLM 实际暴露的 model 名称一致。
+
+`API_TOKEN` 为 `/v1` 端点的 Bearer 鉴权令牌;**留空则鉴权关闭**,服务启动时会打 WARNING 提醒。`/healthz` 始终开放(仅返回模型名,不泄露 LLM base_url)。
 
 ## 4. 构建 sandbox 镜像
 
@@ -112,10 +115,25 @@ docker run --rm --runtime nvidia --gpus all \
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8061
 ```
 
+也可以直接用配置里的 `HOST` / `PORT`：
+
+```bash
+uv run python -m app.main
+```
+
 健康检查：
 
 ```bash
 curl http://127.0.0.1:8061/healthz
+```
+
+配置了 `API_TOKEN` 后，业务端点需要带 Bearer 头：
+
+```bash
+curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"你好"}'
 ```
 
 ## 7. 测试普通对话
@@ -206,12 +224,25 @@ curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
 
 这只是 MVP 的隔离层，不等同于经过安全审计的生产级不可信代码执行平台。
 
-## 14. 生产化时优先改造
+workspace 磁盘增长由后台清理任务兜底：每小时扫描一次，删除超过
+`SANDBOX_WORKSPACE_TTL_DAYS` 天无任何文件活动的 thread workspace（设 0 关闭）。
+
+## 14. 测试
+
+```bash
+uv run pytest -q      # 单元 / API 测试，不需要 Docker 与外部 LLM
+uv run ruff check .
+```
+
+测试覆盖：SSE 端点事件框架与鉴权（401/200）、事件映射、执行工具的 JSON 契约与
+路径安全、workspace TTL 清理、退出码信号语义。测试不触碰真实 Docker 与 LLM。
+
+## 15. 生产化时优先改造
 
 1. `InMemorySaver` -> PostgreSQL `AsyncPostgresSaver`
-2. 为工具增加权限策略和 Human-in-the-loop
+2. 为工具增加权限策略和 Human-in-the-loop（web_search 注入指令 -> 沙箱执行是最高危路径）
 3. sandbox 改成独立 worker / microVM / 专用执行服务
-4. 增加执行配额、并发限制、workspace TTL 和清理机制
+4. 增加执行配额、并发限制与限流（Bearer 鉴权与 workspace TTL 清理已内置）
 5. 接入 LangSmith tracing / evaluation
 6. SSE 增加 request_id、tool_call_id、usage、重试和取消机制
 7. 对 `web_search` 增加 `open_url` / extract，形成搜索 -> 阅读网页流程
