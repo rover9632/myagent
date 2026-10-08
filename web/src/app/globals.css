@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+html,
+body {
+  height: 100%;
+}
+
+/* Blinking block caret while the assistant is typing. */
+.caret::after {
+  content: "▍";
+  margin-left: 1px;
+  animation: caret-blink 0.9s steps(2, start) infinite;
+  color: #10a37f;
+}
+@keyframes caret-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+/* Compact markdown spacing inside bubbles. */
+.md-body :first-child {
+  margin-top: 0;
+}
+.md-body :last-child {
+  margin-bottom: 0;
+}
+.md-body pre {
+  background: #f6f6f6;
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-size: 13px;
+}
+.md-body code:not(pre code) {
+  background: #f0f0f0;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 0.9em;
+}
+.md-body ul,
+.md-body ol {
+  padding-left: 1.4em;
+}
+.md-body a {
+  color: #2563eb;
+  text-decoration: underline;
+}
+.md-body table {
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid #e5e5e5;
+  padding: 4px 10px;
+}
