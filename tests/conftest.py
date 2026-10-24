@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -12,6 +13,7 @@ class FakeAgent:
     def __init__(self, events: list[dict[str, Any]]) -> None:
         self.events = events
         self.received_config: dict | None = None
+        self.received_payload: dict | None = None
 
     async def astream_events(
         self,
@@ -21,6 +23,7 @@ class FakeAgent:
         version: str | None = None,
     ) -> AsyncIterator[dict]:
         self.received_config = config
+        self.received_payload = payload
         for event in self.events:
             yield event
 
@@ -36,8 +39,18 @@ class FakeStream:
 
 
 class FakeSandbox:
-    def __init__(self) -> None:
+    def __init__(self, workspace_root: Any = None) -> None:
         self.calls: list[dict] = []
+        self.workspace_root = Path(workspace_root) if workspace_root is not None else None
+
+    def workspace_for(self, thread_id: str) -> Path:
+        """Mirror DockerSandbox.workspace_for (same sanitization) on tmp_path."""
+        from app.sandbox.docker import DockerSandbox
+
+        assert self.workspace_root is not None, "FakeSandbox built without workspace_root"
+        path = self.workspace_root / DockerSandbox._safe_thread_id(thread_id)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     async def run(self, **kwargs):
         from app.sandbox import SandboxResult

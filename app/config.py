@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     # Delete thread workspaces untouched for this many days; 0 disables cleanup.
     sandbox_workspace_ttl_days: int = Field(default=7, ge=0)
 
+    # Uploads (attachments land in <workspace>/uploads/, visible at /workspace/uploads)
+    upload_max_bytes: int = Field(default=50 * 1024 * 1024, ge=1)
+    upload_max_files_per_thread: int = Field(default=50, ge=1)
+    # Comma-separated allowlist; parsed by app.uploads.parse_allowed_extensions.
+    # (pydantic-settings would demand JSON from env for list[str] - worse DX.)
+    upload_allowed_extensions: str = Field(
+        default="pdf,txt,md,csv,json,log,png,jpg,jpeg,gif,webp,"
+        "doc,docx,xls,xlsx,ppt,pptx,py,js,ts,sh,yaml,yml,toml,ini,xml,html"
+    )
+
     # FastAPI
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8061, ge=1, le=65535)

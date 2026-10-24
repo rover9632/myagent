@@ -3,16 +3,25 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
+from typing import Annotated
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import JSONResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
 
 from app.agent import AgentService, build_agent
 from app.auth import require_token
 from app.config import get_settings
 from app.sandbox import DockerSandbox
-from app.schemas import ChatRequest
+from app.schemas import ChatRequest, UploadResponse
+from app.uploads import (
+    UploadRejected,
+    build_attachment_note,
+    list_uploads,
+    parse_allowed_extensions,
+    save_upload,
+)
 
 settings = get_settings()
 logging.basicConfig(
@@ -76,6 +85,23 @@ app = FastAPI(
 app.state.api_token = settings.api_token
 
 
+@app.middleware("http")
+async def reject_oversized_upload(request: Request, call_next):
+    """Early-reject giant uploads BEFORE Starlette spools the whole body to /tmp.
+
+    A dependency can't do this: FastAPI awaits request.form() before solving
+    dependencies, and form parsing has no size cap for file parts. The exact
+    limit is still enforced chunk-by-chunk in app.uploads._copy_capped for
+    chunked requests that omit Content-Length.
+    """
+    if request.method == "POST" and request.url.path == "/v1/agent/files":
+        length = request.headers.get("content-length")
+        # +1MB slack for multipart framing overhead.
+        if length and length.isdigit() and int(length) > settings.upload_max_bytes + 1024 * 1024:
+            return JSONResponse({"detail": "upload exceeds size limit"}, status_code=413)
+    return await call_next(request)
+
+
 @app.get("/healthz")
 async def healthz():
     return {
@@ -83,6 +109,44 @@ async def healthz():
         "model": settings.llm_model,
         "sandbox_image": settings.sandbox_image,
     }
+
+
+@app.post(
+    "/v1/agent/files",
+    response_model=UploadResponse,
+    dependencies=[Depends(require_token)],
+)
+async def upload_agent_file(
+    file: Annotated[UploadFile, File()],
+    thread_id: Annotated[str, Form(min_length=1, max_length=200)],
+):
+    sandbox = getattr(app.state, "sandbox", None)
+    if sandbox is None:
+        raise HTTPException(status_code=503, detail="sandbox not ready")
+    workspace = sandbox.workspace_for(thread_id)  # idempotent mkdir
+    try:
+        return await save_upload(
+            spool=file.file,  # raw spool; read in-thread, never fully in RAM
+            original_filename=file.filename,  # untrusted -> sanitized inside
+            workspace=workspace,
+            max_bytes=settings.upload_max_bytes,
+            allowed=parse_allowed_extensions(settings.upload_allowed_extensions),
+            max_files=settings.upload_max_files_per_thread,
+        )
+    except UploadRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    finally:
+        await file.close()
+
+
+@app.get("/v1/agent/files", dependencies=[Depends(require_token)])
+async def list_agent_files(thread_id: str = Query(min_length=1, max_length=200)):
+    sandbox = getattr(app.state, "sandbox", None)
+    if sandbox is None:
+        raise HTTPException(status_code=503, detail="sandbox not ready")
+    workspace = sandbox.workspace_for(thread_id)
+    files = await asyncio.to_thread(list_uploads, workspace)
+    return {"files": files}
 
 
 @app.post(
@@ -94,9 +158,18 @@ async def chat_stream(request: ChatRequest):
     thread_id = request.thread_id or uuid4().hex
     service: AgentService = app.state.agent_service
 
+    # Attachment manifest is injected only when the client echoes attachments;
+    # the directory scan then validates/augments them (see app.uploads).
+    note = None
+    sandbox = getattr(app.state, "sandbox", None)
+    if request.attachments and sandbox is not None:
+        workspace = sandbox.workspace_for(thread_id)
+        note = await asyncio.to_thread(build_attachment_note, workspace, request.attachments)
+
     async for event in service.stream(
         thread_id=thread_id,
         message=request.message,
+        attachment_note=note,
     ):
         yield ServerSentEvent(data=event.data, event=event.type)
 

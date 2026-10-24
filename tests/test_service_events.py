@@ -31,6 +31,29 @@ async def test_stream_forwards_thread_id_to_config(fake_events):
     assert agent.received_config == {"configurable": {"thread_id": "t42"}}
 
 
+async def test_stream_appends_attachment_note_after_message(fake_events):
+    agent = FakeAgent(fake_events)
+    service = AgentService(agent)
+    _ = [
+        event
+        async for event in service.stream(
+            thread_id="t1", message="总结这个文件", attachment_note="[系统注入 · 附件清单]\n- x"
+        )
+    ]
+
+    content = agent.received_payload["messages"][0]["content"]
+    assert content.startswith("总结这个文件\n\n")
+    assert content.endswith("[系统注入 · 附件清单]\n- x")
+
+
+async def test_stream_without_note_sends_message_verbatim(fake_events):
+    agent = FakeAgent(fake_events)
+    service = AgentService(agent)
+    _ = [event async for event in service.stream(thread_id="t1", message="hi")]
+
+    assert agent.received_payload["messages"][0]["content"] == "hi"
+
+
 async def test_stream_error_event_on_chain_error():
     events = [{"event": "on_chain_error", "data": {"error": RuntimeError("boom")}}]
     service = AgentService(FakeAgent(events))

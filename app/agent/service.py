@@ -52,6 +52,7 @@ class AgentService:
         *,
         thread_id: str,
         message: str,
+        attachment_note: str | None = None,
     ) -> AsyncIterator[SSEEvent]:
         token = set_thread_id(thread_id)
         try:
@@ -66,13 +67,17 @@ class AgentService:
                 }
             }
 
+            # User intent first; the attachment manifest is system context
+            # appended only for turns that actually echo attachments.
+            content = message if not attachment_note else f"{message}\n\n{attachment_note}"
+
             try:
                 async for event in self.agent.astream_events(
                     {
                         "messages": [
                             {
                                 "role": "user",
-                                "content": message,
+                                "content": content,
                             }
                         ]
                     },
