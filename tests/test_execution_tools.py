@@ -5,7 +5,7 @@ import json
 import pytest
 from conftest import FakeSandbox
 
-from app.context import reset_thread_id, set_thread_id
+from app.context import reset_thread_id, reset_username, set_thread_id, set_username
 from app.tools.execution import _normalize_relative_script_path, _shell_quote, build_execution_tools
 
 
@@ -38,12 +38,14 @@ def test_shell_quote_roundtrip():
 
 async def test_bash_exec_json_contract_and_thread_binding():
     sandbox = FakeSandbox()
-    token = set_thread_id("thread-7")
+    utoken = set_username("alice")
+    ttoken = set_thread_id("thread-7")
     try:
         bash_exec, _python_exec, _run_script = build_execution_tools(sandbox)
         raw = await bash_exec.coroutine(command="ls", timeout_seconds=5)
     finally:
-        reset_thread_id(token)
+        reset_thread_id(ttoken)
+        reset_username(utoken)
 
     payload = json.loads(raw)
     assert payload["exit_code"] == 0
@@ -55,22 +57,26 @@ async def test_bash_exec_json_contract_and_thread_binding():
         "timed_out",
         "output_truncated",
     }
-    # The tool must forward the ambient thread_id, never a client-supplied one.
+    # The tool must forward the ambient user + thread_id, never client-supplied ones.
+    assert sandbox.calls[0]["user"] == "alice"
     assert sandbox.calls[0]["thread_id"] == "thread-7"
     assert sandbox.calls[0]["command"] == "ls"
 
 
 async def test_python_exec_feeds_code_via_stdin():
     sandbox = FakeSandbox()
-    token = set_thread_id("thread-7")
+    utoken = set_username("alice")
+    ttoken = set_thread_id("thread-7")
     try:
         _bash, python_exec, _run = build_execution_tools(sandbox)
         await python_exec.coroutine(code="print(1)", timeout_seconds=3)
     finally:
-        reset_thread_id(token)
+        reset_thread_id(ttoken)
+        reset_username(utoken)
 
     assert sandbox.calls[0]["command"] == "python -"
     assert sandbox.calls[0]["stdin_data"] == "print(1)"
+    assert sandbox.calls[0]["user"] == "alice"
 
 
 async def test_python_exec_rejects_oversized_code():
@@ -81,12 +87,26 @@ async def test_python_exec_rejects_oversized_code():
 
 async def test_python_run_script_quotes_arguments():
     sandbox = FakeSandbox()
-    token = set_thread_id("thread-7")
+    utoken = set_username("alice")
+    ttoken = set_thread_id("thread-7")
     try:
         _bash, _python, run_script = build_execution_tools(sandbox)
         await run_script.coroutine(script_path="a b.py", args=["it's me"], timeout_seconds=3)
     finally:
-        reset_thread_id(token)
+        reset_thread_id(ttoken)
+        reset_username(utoken)
 
     # Full command: `python <quoted path> <quoted args...>`
     assert sandbox.calls[0]["command"] == "python 'a b.py' 'it'\\''s me'"
+    assert sandbox.calls[0]["user"] == "alice"
+
+
+async def test_tools_raise_without_username_binding():
+    sandbox = FakeSandbox()
+    token = set_thread_id("thread-7")
+    try:
+        bash_exec, _python_exec, _run_script = build_execution_tools(sandbox)
+        with pytest.raises(RuntimeError, match="username"):
+            await bash_exec.coroutine(command="ls", timeout_seconds=5)
+    finally:
+        reset_thread_id(token)

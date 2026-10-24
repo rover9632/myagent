@@ -9,9 +9,13 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.sse import EventSourceResponse, ServerSentEvent
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
 from app.agent import AgentService, build_agent
-from app.auth import require_token
+from app.auth import User, require_user
+from app.auth_api import router as auth_router
 from app.config import get_settings
 from app.sandbox import DockerSandbox
 from app.schemas import ChatRequest, UploadResponse
@@ -22,6 +26,7 @@ from app.uploads import (
     parse_allowed_extensions,
     save_upload,
 )
+from app.user_store import UserStore
 
 settings = get_settings()
 logging.basicConfig(
@@ -45,10 +50,6 @@ async def _workspace_cleanup_loop(sandbox: DockerSandbox, interval_seconds: int 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if not settings.api_token:
-        logger.warning("API_TOKEN is empty: /v1 endpoints are UNAUTHENTICATED. "
-                       "Bind to 127.0.0.1 or set API_TOKEN before exposing this service.")
-
     sandbox = DockerSandbox(
         image=settings.sandbox_image,
         workspace_root=settings.sandbox_workspace_root,
@@ -60,9 +61,34 @@ async def lifespan(app: FastAPI):
         max_output_bytes=settings.sandbox_max_output_bytes,
         workspace_ttl_days=settings.sandbox_workspace_ttl_days,
     )
+    await sandbox.check_available()  # fail before touching PG when docker is broken
 
-    await sandbox.check_available()
-    agent = build_agent(settings, sandbox)
+    pool = AsyncConnectionPool(
+        conninfo=settings.pg_uri,  # plain libpq URI: postgresql://user:pass@host:port/db
+        min_size=settings.pg_pool_min_size,
+        max_size=settings.pg_pool_max_size,
+        open=False,  # never open implicitly in __init__
+        check=AsyncConnectionPool.check_connection,  # revive/replace dead conns
+        kwargs={
+            "autocommit": True,  # required by AsyncPostgresSaver for pools
+            "prepare_threshold": None,  # required pattern; also pgbouncer-safe
+            "row_factory": dict_row,  # required by the saver; handy for UserStore
+        },
+    )
+    try:
+        await pool.open(wait=True)  # fail fast on bad credentials/host
+    except Exception as exc:
+        raise RuntimeError(f"Postgres unavailable at startup: {exc}") from exc
+
+    user_store = UserStore(pool, session_ttl_days=settings.session_ttl_days)
+    await user_store.bootstrap()  # CREATE TABLE IF NOT EXISTS users/sessions
+
+    checkpointer = AsyncPostgresSaver(pool)  # ctor needs a running loop → here, not import time
+    await checkpointer.setup()  # idempotent checkpoint-table migrations
+
+    agent = build_agent(settings, sandbox, checkpointer)
+    app.state.pool = pool
+    app.state.user_store = user_store
     app.state.agent_service = AgentService(agent)
     app.state.sandbox = sandbox
     logger.info("Agent ready: model=%s base_url=%s", settings.llm_model, settings.llm_base_url)
@@ -74,6 +100,7 @@ async def lifespan(app: FastAPI):
         cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
+        await pool.close()
 
 
 app = FastAPI(
@@ -81,8 +108,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
-# Read at request time (see app/auth.py) so tests and tooling can override it.
-app.state.api_token = settings.api_token
+app.include_router(auth_router)
 
 
 @app.middleware("http")
@@ -111,19 +137,16 @@ async def healthz():
     }
 
 
-@app.post(
-    "/v1/agent/files",
-    response_model=UploadResponse,
-    dependencies=[Depends(require_token)],
-)
+@app.post("/v1/agent/files", response_model=UploadResponse)
 async def upload_agent_file(
     file: Annotated[UploadFile, File()],
     thread_id: Annotated[str, Form(min_length=1, max_length=200)],
+    user: Annotated[User, Depends(require_user)],
 ):
     sandbox = getattr(app.state, "sandbox", None)
     if sandbox is None:
         raise HTTPException(status_code=503, detail="sandbox not ready")
-    workspace = sandbox.workspace_for(thread_id)  # idempotent mkdir
+    workspace = sandbox.workspace_for(user.username, thread_id)  # idempotent mkdir
     try:
         return await save_upload(
             spool=file.file,  # raw spool; read in-thread, never fully in RAM
@@ -139,22 +162,21 @@ async def upload_agent_file(
         await file.close()
 
 
-@app.get("/v1/agent/files", dependencies=[Depends(require_token)])
-async def list_agent_files(thread_id: str = Query(min_length=1, max_length=200)):
+@app.get("/v1/agent/files")
+async def list_agent_files(
+    thread_id: Annotated[str, Query(min_length=1, max_length=200)],
+    user: Annotated[User, Depends(require_user)],
+):
     sandbox = getattr(app.state, "sandbox", None)
     if sandbox is None:
         raise HTTPException(status_code=503, detail="sandbox not ready")
-    workspace = sandbox.workspace_for(thread_id)
+    workspace = sandbox.workspace_for(user.username, thread_id)
     files = await asyncio.to_thread(list_uploads, workspace)
     return {"files": files}
 
 
-@app.post(
-    "/v1/agent/chat/stream",
-    response_class=EventSourceResponse,
-    dependencies=[Depends(require_token)],
-)
-async def chat_stream(request: ChatRequest):
+@app.post("/v1/agent/chat/stream", response_class=EventSourceResponse)
+async def chat_stream(request: ChatRequest, user: Annotated[User, Depends(require_user)]):
     thread_id = request.thread_id or uuid4().hex
     service: AgentService = app.state.agent_service
 
@@ -163,10 +185,11 @@ async def chat_stream(request: ChatRequest):
     note = None
     sandbox = getattr(app.state, "sandbox", None)
     if request.attachments and sandbox is not None:
-        workspace = sandbox.workspace_for(thread_id)
+        workspace = sandbox.workspace_for(user.username, thread_id)
         note = await asyncio.to_thread(build_attachment_note, workspace, request.attachments)
 
     async for event in service.stream(
+        username=user.username,
         thread_id=thread_id,
         message=request.message,
         attachment_note=note,

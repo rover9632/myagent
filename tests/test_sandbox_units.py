@@ -64,11 +64,11 @@ def _backdate(path: Path, days: float) -> None:
 def test_cleanup_removes_only_expired_workspaces(tmp_path):
     sandbox = make_sandbox(tmp_path, workspace_ttl_days=7)
 
-    stale = sandbox.workspace_for("stale-thread")
+    stale = sandbox.workspace_for("alice", "stale-thread")
     (stale / "out.txt").write_text("old")
     _backdate(stale, days=10)
 
-    fresh = sandbox.workspace_for("fresh-thread")
+    fresh = sandbox.workspace_for("alice", "fresh-thread")
     (fresh / "live.txt").write_text("new")
 
     removed = sandbox.cleanup_expired_workspaces()
@@ -78,10 +78,38 @@ def test_cleanup_removes_only_expired_workspaces(tmp_path):
     assert fresh.exists()
 
 
+def test_cleanup_prunes_empty_user_dirs(tmp_path):
+    sandbox = make_sandbox(tmp_path, workspace_ttl_days=7)
+
+    stale = sandbox.workspace_for("gone", "stale-thread")
+    (stale / "out.txt").write_text("old")
+    _backdate(stale, days=10)
+    user_dir = stale.parent
+
+    assert sandbox.cleanup_expired_workspaces() == 1
+    assert not stale.exists()
+    assert not user_dir.exists()  # emptied user dir pruned in the same sweep
+
+
+def test_cleanup_keeps_user_dir_with_fresh_thread(tmp_path):
+    sandbox = make_sandbox(tmp_path, workspace_ttl_days=7)
+
+    stale = sandbox.workspace_for("mixed", "stale-thread")
+    (stale / "out.txt").write_text("old")
+    _backdate(stale, days=10)
+    fresh = sandbox.workspace_for("mixed", "fresh-thread")
+    (fresh / "live.txt").write_text("new")
+
+    assert sandbox.cleanup_expired_workspaces() == 1
+    assert not stale.exists()
+    assert fresh.exists()
+    assert stale.parent.exists()  # user dir survives while any thread remains
+
+
 def test_cleanup_keeps_workspace_with_recent_nested_file(tmp_path):
     sandbox = make_sandbox(tmp_path, workspace_ttl_days=7)
 
-    workspace = sandbox.workspace_for("quiet-dir")
+    workspace = sandbox.workspace_for("alice", "quiet-dir")
     nested = workspace / "scripts"
     nested.mkdir()
     _backdate(workspace, days=10)
@@ -94,11 +122,12 @@ def test_cleanup_keeps_workspace_with_recent_nested_file(tmp_path):
 
 def test_cleanup_disabled_with_zero_ttl(tmp_path):
     sandbox = make_sandbox(tmp_path, workspace_ttl_days=0)
-    stale = sandbox.workspace_for("stale-thread")
+    stale = sandbox.workspace_for("alice", "stale-thread")
     _backdate(stale, days=365)
 
     assert sandbox.cleanup_expired_workspaces() == 0
     assert stale.exists()
+    assert stale.parent.exists()  # nothing touched at all
 
 
 def test_safe_thread_id_stable_and_digest_bound():
@@ -115,5 +144,7 @@ def test_safe_thread_id_stable_and_digest_bound():
 )
 def test_workspace_stays_under_root(tmp_path, raw):
     sandbox = make_sandbox(tmp_path)
-    workspace = sandbox.workspace_for(raw)
-    assert workspace.parent == tmp_path.resolve() or tmp_path in workspace.parents
+    workspace = sandbox.workspace_for("alice", raw)
+    # Exactly two sanitized levels under the root, no matter the input.
+    assert tmp_path.resolve() in workspace.parents
+    assert workspace.parent.parent == tmp_path.resolve()

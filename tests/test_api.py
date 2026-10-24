@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from conftest import FakeAgent
+from conftest import FakeAgent, logged_in
 
 from app.agent.service import AgentService
 from app.main import app
@@ -15,9 +15,9 @@ def client():
     # ASGITransport does not run the lifespan, so wire just enough state.
     app.state.agent_service = AgentService(FakeAgent([]))
     app.state.sandbox = None
-    app.state.api_token = ""
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    with logged_in(app, username="tester"):
+        transport = httpx.ASGITransport(app=app)
+        yield httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
 async def test_healthz_stays_open(client):
@@ -47,26 +47,33 @@ async def test_empty_message_rejected(client):
     assert resp.status_code == 422
 
 
-async def test_auth_rejects_when_token_configured(client):
-    app.state.api_token = "s3cret"
+async def test_agent_endpoints_require_session(client):
+    app.dependency_overrides.clear()  # exercise the REAL require_user path
 
-    missing = await client.post(ENDPOINT, json={"message": "hi"})
-    wrong = await client.post(
-        ENDPOINT, json={"message": "hi"}, headers={"Authorization": "Bearer nope"}
-    )
-    basic_scheme = await client.post(
-        ENDPOINT, json={"message": "hi"}, headers={"Authorization": "token s3cret"}
-    )
+    for headers in (
+        {},  # missing entirely
+        {"Authorization": "Bearer nope"},  # unknown token
+        {"Authorization": "token s3cret"},  # wrong scheme
+    ):
+        stream = await client.post(ENDPOINT, json={"message": "hi"}, headers=headers)
+        upload = await client.post(
+            "/v1/agent/files",
+            files={"file": ("notes.txt", b"hello", "text/plain")},
+            data={"thread_id": "t1"},
+            headers=headers,
+        )
+        listing = await client.get("/v1/agent/files", params={"thread_id": "t1"}, headers=headers)
+        for resp in (stream, upload, listing):
+            assert resp.status_code == 401
+            assert resp.headers.get("www-authenticate") == "Bearer"
 
-    assert missing.status_code == 401
-    assert wrong.status_code == 401
-    assert basic_scheme.status_code == 401
-    assert missing.headers.get("www-authenticate") == "Bearer"
 
+async def test_stream_config_is_namespaced_per_user(client, fake_events):
+    agent = FakeAgent(fake_events)
+    app.state.agent_service = AgentService(agent)
 
-async def test_auth_accepts_correct_bearer_token(client):
-    app.state.api_token = "s3cret"
-    resp = await client.post(
-        ENDPOINT, json={"message": "hi"}, headers={"Authorization": "Bearer s3cret"}
-    )
+    resp = await client.post(ENDPOINT, json={"message": "hi", "thread_id": "t1"})
     assert resp.status_code == 200
+    # Checkpointer key is namespaced with the logged-in username, while SSE
+    # events keep echoing the client-facing thread_id.
+    assert agent.received_config == {"configurable": {"thread_id": "tester:t1"}}

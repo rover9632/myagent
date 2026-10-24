@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from app.agent.prompts import SYSTEM_PROMPT
 from app.config import Settings
@@ -11,7 +11,11 @@ from app.tools.execution import build_execution_tools
 from app.tools.web import build_web_tools
 
 
-def build_agent(settings: Settings, sandbox: DockerSandbox):
+def build_agent(
+    settings: Settings,
+    sandbox: DockerSandbox,
+    checkpointer: BaseCheckpointSaver,
+):
     model = ChatOpenAI(
         model=settings.llm_model,
         base_url=settings.llm_base_url,
@@ -32,8 +36,6 @@ def build_agent(settings: Settings, sandbox: DockerSandbox):
         ),
         *build_execution_tools(sandbox),
     ]
-
-    checkpointer = InMemorySaver()
 
     return create_agent(
         model=model,

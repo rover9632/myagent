@@ -55,6 +55,7 @@ async def test_python_exec_stdin_reaches_container(tmp_path):
     # `python -` sees instant EOF, executes nothing and exits 0 silently.
     sandbox = make_sandbox(tmp_path)
     result = await sandbox.run(
+        user="it-user",
         thread_id="it-thread",
         command="python -",
         stdin_data="import sys\nprint('STDOUT-OK')\nprint('STDERR-OK', file=sys.stderr)\n",
@@ -67,33 +68,41 @@ async def test_python_exec_stdin_reaches_container(tmp_path):
 
 async def test_bash_exec_captures_output_and_exit_code(tmp_path):
     sandbox = make_sandbox(tmp_path)
-    ok = await sandbox.run(thread_id="it-thread", command="echo hi")
+    ok = await sandbox.run(user="it-user", thread_id="it-thread", command="echo hi")
     assert ok.stdout.strip() == "hi"
 
-    fail = await sandbox.run(thread_id="it-thread", command="exit 3")
+    fail = await sandbox.run(user="it-user", thread_id="it-thread", command="exit 3")
     assert fail.exit_code == 3
 
 
 async def test_workspace_files_persist_across_runs(tmp_path):
     sandbox = make_sandbox(tmp_path)
     write = await sandbox.run(
+        user="it-user",
         thread_id="it-thread",
         command="python -",
         stdin_data="open('marker.txt', 'w').write('kept')\n",
     )
     assert write.exit_code == 0
 
-    read = await sandbox.run(thread_id="it-thread", command="cat marker.txt")
+    read = await sandbox.run(user="it-user", thread_id="it-thread", command="cat marker.txt")
     assert read.stdout.strip() == "kept"
 
     # Different thread must not see another thread's workspace.
-    other = await sandbox.run(thread_id="other-thread", command="cat marker.txt")
+    other = await sandbox.run(user="it-user", thread_id="other-thread", command="cat marker.txt")
     assert other.exit_code != 0
+
+    # Same thread_id but different USER must not see it either.
+    cross_user = await sandbox.run(
+        user="other-user", thread_id="it-thread", command="cat marker.txt"
+    )
+    assert cross_user.exit_code != 0
 
 
 async def test_timeout_kills_and_reports_124(tmp_path):
     sandbox = make_sandbox(tmp_path)
     result = await sandbox.run(
+        user="it-user",
         thread_id="it-thread",
         command="sleep 30",
         timeout_seconds=2,

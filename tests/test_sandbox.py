@@ -18,17 +18,24 @@ def make_sandbox(tmp_path: Path) -> DockerSandbox:
 
 def test_workspace_is_stable_and_separated(tmp_path: Path):
     sandbox = make_sandbox(tmp_path)
-    a = sandbox.workspace_for("demo/1")
-    b = sandbox.workspace_for("demo_1")
+    a = sandbox.workspace_for("alice", "demo/1")
+    b = sandbox.workspace_for("alice", "demo_1")
+    c = sandbox.workspace_for("bob", "demo/1")
 
-    assert a != b
+    assert a != b  # digest suffix separates sanitized-collision thread ids
+    assert a != c  # same thread id under different users never collides
     assert a.exists()
     assert b.exists()
-    assert a.parent == tmp_path
-    assert b.parent == tmp_path
+    assert c.exists()
+    assert a.parent.parent == tmp_path  # exactly two levels: root/<user>/<thread>
+    assert b.parent == a.parent  # same user dir
+    assert c.parent != a.parent  # different user dir
 
 
 def test_workspace_stays_under_root(tmp_path: Path):
     sandbox = make_sandbox(tmp_path)
-    workspace = sandbox.workspace_for("../../etc/passwd")
-    assert workspace.parent == tmp_path
+    workspace = sandbox.workspace_for("alice", "../../etc/passwd")
+    assert workspace.parent.parent == tmp_path
+    # Even a hostile *username* stays exactly two levels under the root.
+    evil = sandbox.workspace_for("../../evil", "t")
+    assert evil.parent.parent == tmp_path

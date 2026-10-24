@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
-from app.context import reset_thread_id, set_thread_id
+from app.context import reset_thread_id, reset_username, set_thread_id, set_username
 from app.schemas import SSEEvent
 
 _TOOL_NAMES = {
@@ -50,20 +50,26 @@ class AgentService:
     async def stream(
         self,
         *,
+        username: str,
         thread_id: str,
         message: str,
         attachment_note: str | None = None,
     ) -> AsyncIterator[SSEEvent]:
-        token = set_thread_id(thread_id)
+        user_token = set_username(username)
+        thread_token = set_thread_id(thread_id)
         try:
             yield SSEEvent(
                 type="start",
                 data={"thread_id": thread_id},
             )
 
+            # Namespace the checkpointer key per user: thread_id alone is
+            # client-supplied and the store is shared — "alice:t1" vs "bob:t1"
+            # can never collide. The username regex excludes ":" so the split
+            # is unambiguous. SSE start/done keep echoing the client thread_id.
             config = {
                 "configurable": {
-                    "thread_id": thread_id,
+                    "thread_id": f"{username}:{thread_id}",
                 }
             }
 
@@ -134,4 +140,5 @@ class AgentService:
                 data={"thread_id": thread_id},
             )
         finally:
-            reset_thread_id(token)
+            reset_thread_id(thread_token)
+            reset_username(user_token)

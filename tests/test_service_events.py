@@ -4,12 +4,12 @@ import pytest
 from conftest import FakeAgent
 
 from app.agent.service import AgentService, _extract_text, _truncate_value
-from app.context import get_thread_id
+from app.context import get_thread_id, get_username
 
 
 async def test_stream_event_sequence(fake_events):
     service = AgentService(FakeAgent(fake_events))
-    out = [event async for event in service.stream(thread_id="t1", message="hi")]
+    out = [event async for event in service.stream(username="alice", thread_id="t1", message="hi")]
 
     assert [event.type for event in out] == [
         "start",
@@ -18,17 +18,21 @@ async def test_stream_event_sequence(fake_events):
         "token",
         "done",
     ]
+    # SSE keeps echoing the CLIENT-facing thread_id, not the namespaced key.
     assert out[0].data["thread_id"] == "t1"
+    assert out[-1].data["thread_id"] == "t1"
     assert out[1].data["tool"] == "bash_exec"
     assert out[3].data["text"] == "hello"
 
 
-async def test_stream_forwards_thread_id_to_config(fake_events):
+async def test_stream_config_is_namespaced_per_user(fake_events):
     agent = FakeAgent(fake_events)
     service = AgentService(agent)
-    _ = [event async for event in service.stream(thread_id="t42", message="hi")]
+    _ = [event async for event in service.stream(username="alice", thread_id="t42", message="hi")]
 
-    assert agent.received_config == {"configurable": {"thread_id": "t42"}}
+    # Checkpointer key must be namespaced: shared store + client-supplied
+    # thread_id would otherwise let users collide into each other's memory.
+    assert agent.received_config == {"configurable": {"thread_id": "alice:t42"}}
 
 
 async def test_stream_appends_attachment_note_after_message(fake_events):
@@ -37,7 +41,10 @@ async def test_stream_appends_attachment_note_after_message(fake_events):
     _ = [
         event
         async for event in service.stream(
-            thread_id="t1", message="总结这个文件", attachment_note="[系统注入 · 附件清单]\n- x"
+            username="alice",
+            thread_id="t1",
+            message="总结这个文件",
+            attachment_note="[系统注入 · 附件清单]\n- x",
         )
     ]
 
@@ -49,7 +56,7 @@ async def test_stream_appends_attachment_note_after_message(fake_events):
 async def test_stream_without_note_sends_message_verbatim(fake_events):
     agent = FakeAgent(fake_events)
     service = AgentService(agent)
-    _ = [event async for event in service.stream(thread_id="t1", message="hi")]
+    _ = [event async for event in service.stream(username="alice", thread_id="t1", message="hi")]
 
     assert agent.received_payload["messages"][0]["content"] == "hi"
 
@@ -57,7 +64,7 @@ async def test_stream_without_note_sends_message_verbatim(fake_events):
 async def test_stream_error_event_on_chain_error():
     events = [{"event": "on_chain_error", "data": {"error": RuntimeError("boom")}}]
     service = AgentService(FakeAgent(events))
-    out = [event async for event in service.stream(thread_id="t1", message="hi")]
+    out = [event async for event in service.stream(username="alice", thread_id="t1", message="hi")]
 
     assert [event.type for event in out] == ["start", "error"]
     assert "boom" in out[1].data["message"]
@@ -66,17 +73,19 @@ async def test_stream_error_event_on_chain_error():
 async def test_unknown_tool_events_are_ignored():
     events = [{"event": "on_tool_start", "name": "internal_thing", "data": {}}]
     service = AgentService(FakeAgent(events))
-    out = [event async for event in service.stream(thread_id="t1", message="hi")]
+    out = [event async for event in service.stream(username="alice", thread_id="t1", message="hi")]
 
     assert [event.type for event in out] == ["start", "done"]
 
 
-async def test_thread_contextvar_is_reset_after_stream():
+async def test_contextvars_are_reset_after_stream():
     service = AgentService(FakeAgent([]))
-    _ = [event async for event in service.stream(thread_id="t1", message="hi")]
+    _ = [event async for event in service.stream(username="alice", thread_id="t1", message="hi")]
 
     with pytest.raises(RuntimeError):
         get_thread_id()
+    with pytest.raises(RuntimeError):
+        get_username()
 
 
 def test_extract_text_handles_blocks_and_plain():

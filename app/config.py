@@ -48,12 +48,16 @@ class Settings(BaseSettings):
         "doc,docx,xls,xlsx,ppt,pptx,py,js,ts,sh,yaml,yml,toml,ini,xml,html"
     )
 
+    # PostgreSQL (users, sessions, LangGraph checkpoints)
+    pg_uri: str = Field(default="postgresql://postgres@127.0.0.1:5432/myagent")
+    pg_pool_min_size: int = Field(default=2, ge=0)
+    pg_pool_max_size: int = Field(default=10, ge=1)
+    session_ttl_days: int = Field(default=30, ge=1, le=365)
+
     # FastAPI
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8061, ge=1, le=65535)
     log_level: str = Field(default="INFO")
-    # Bearer token for /v1 endpoints. Empty string disables auth (warned at startup).
-    api_token: str = Field(default="")
 
 
 @lru_cache(maxsize=1)

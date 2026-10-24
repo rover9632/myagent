@@ -69,13 +69,19 @@ class DockerSandbox:
 
     @staticmethod
     def _safe_thread_id(thread_id: str) -> str:
+        """Sanitize one path segment (used for BOTH the user and thread levels)."""
         value = _THREAD_ID_RE.sub("_", thread_id).strip("._-")
         value = value[:64] or "default"
         digest = hashlib.sha256(thread_id.encode()).hexdigest()[:12]
         return f"{value}-{digest}"
 
-    def workspace_for(self, thread_id: str) -> Path:
-        path = self.workspace_root / self._safe_thread_id(thread_id)
+    def workspace_for(self, user: str, thread_id: str) -> Path:
+        """Host workspace for one (user, thread) pair; the single path funnel.
+
+        Both segments go through _safe_thread_id (defense in depth: safe even if
+        a caller ever passes an unvalidated username) — layout root/<user>/<thread>.
+        """
+        path = self.workspace_root / self._safe_thread_id(user) / self._safe_thread_id(thread_id)
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -113,6 +119,7 @@ class DockerSandbox:
     async def run(
         self,
         *,
+        user: str,
         thread_id: str,
         command: str,
         stdin_data: str | None = None,
@@ -121,7 +128,7 @@ class DockerSandbox:
         timeout = timeout_seconds or self.default_timeout_seconds
         timeout = max(1, min(timeout, self.max_timeout_seconds))
 
-        workspace = self.workspace_for(thread_id)
+        workspace = self.workspace_for(user, thread_id)
         container_name = f"agent-sbx-{uuid.uuid4().hex[:12]}"
 
         # The sandbox intentionally has no network and no host filesystem access.
@@ -229,10 +236,12 @@ class DockerSandbox:
         return returncode
 
     def cleanup_expired_workspaces(self, ttl_days: int | None = None) -> int:
-        """Delete thread workspaces untouched for longer than the TTL.
+        """Delete thread workspaces untouched for longer than the TTL (two-level).
 
-        Returns the number of removed directories. Only immediate subdirectories
-        of workspace_root are considered; the root itself is never removed.
+        Layout is root/<user>/<thread>; `removed` counts thread dirs only. After
+        each user dir is swept, a bare rmdir() prunes it when empty (fails
+        harmlessly with OSError when not, or when a concurrent request just
+        re-created a thread dir). The root itself is never removed.
         A TTL of 0 disables cleanup.
         """
         days = self.workspace_ttl_days if ttl_days is None else ttl_days
@@ -241,16 +250,27 @@ class DockerSandbox:
 
         cutoff = time.time() - days * 86400
         removed = 0
-        for entry in self.workspace_root.iterdir():
-            if not entry.is_dir():
+        for user_dir in self.workspace_root.iterdir():
+            if not user_dir.is_dir():
                 continue
             try:
-                if self._latest_activity(entry) >= cutoff:
-                    continue
-                shutil.rmtree(entry)
-                removed += 1
+                thread_dirs = list(user_dir.iterdir())
             except OSError:
-                # Directory vanished or is mid-write by another thread; retry next cycle.
+                continue
+            for entry in thread_dirs:
+                if not entry.is_dir():
+                    continue
+                try:
+                    if self._latest_activity(entry) >= cutoff:
+                        continue
+                    shutil.rmtree(entry)
+                    removed += 1
+                except OSError:
+                    # Directory vanished or is mid-write by another thread; retry next cycle.
+                    continue
+            try:
+                user_dir.rmdir()  # only succeeds when empty
+            except OSError:
                 continue
         return removed
 

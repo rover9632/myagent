@@ -4,7 +4,7 @@ import io
 
 import httpx
 import pytest
-from conftest import FakeAgent, FakeSandbox
+from conftest import FakeAgent, FakeSandbox, logged_in
 
 from app import uploads as up
 from app.agent.service import AgentService
@@ -252,9 +252,9 @@ def client(tmp_path):
     # ASGITransport does not run the lifespan, so wire just enough state.
     app.state.agent_service = AgentService(FakeAgent([]))
     app.state.sandbox = FakeSandbox(workspace_root=tmp_path)
-    app.state.api_token = ""
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
+    with logged_in(app, username="tester"):
+        transport = httpx.ASGITransport(app=app)
+        yield httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
 
 def _post_file(client, name="notes.txt", content=b"hello", thread_id="t-up", headers=None):
@@ -275,7 +275,7 @@ async def test_api_upload_happy_path(client):
     assert body["size"] == 7
     assert body["container_path"] == "/workspace/uploads/报告_final.pdf"
 
-    workspace = app.state.sandbox.workspace_for("t-up")
+    workspace = app.state.sandbox.workspace_for("tester", "t-up")
     assert (workspace / "uploads" / "报告_final.pdf").read_bytes() == b"PDFDATA"
 
 
@@ -299,12 +299,21 @@ async def test_api_upload_missing_thread_id_422(client):
     assert resp.status_code == 422
 
 
-async def test_api_upload_requires_token(client):
-    app.state.api_token = "s3cret"
+async def test_api_upload_requires_session(client):
+    app.dependency_overrides.clear()  # exercise the REAL require_user path
     anon = await _post_file(client)
-    authed = await _post_file(client, headers={"Authorization": "Bearer s3cret"})
     assert anon.status_code == 401
+    assert anon.headers.get("www-authenticate") == "Bearer"
+
+    store = app.state.user_store
+    user = await store.create_user("alice", "password123")
+    token, _expires = await store.create_session(user.id)
+    authed = await _post_file(client, headers={"Authorization": f"Bearer {token}"})
     assert authed.status_code == 200
+    # The file lands under alice's two-level namespace, proving per-user dirs
+    # end-to-end through the real dependency.
+    saved = app.state.sandbox.workspace_for("alice", "t-up") / "uploads" / "notes.txt"
+    assert saved.read_bytes() == b"hello"
 
 
 async def test_api_upload_sandbox_not_ready_503(client):
@@ -321,8 +330,8 @@ async def test_api_upload_over_limit_413_exact(client, monkeypatch):
     assert resp.status_code == 413
     assert "10-byte" in resp.json()["detail"]
     # No partial file or stray tmp left behind.
-    directory = up.uploads_dir(app.state.sandbox.workspace_for("t-up"))
-    assert list_uploads(app.state.sandbox.workspace_for("t-up")) == []
+    directory = up.uploads_dir(app.state.sandbox.workspace_for("tester", "t-up"))
+    assert list_uploads(app.state.sandbox.workspace_for("tester", "t-up")) == []
     assert not any(p.name.startswith(".uploading-") for p in directory.iterdir())
 
 
@@ -331,7 +340,7 @@ async def test_api_upload_middleware_fast_413(client, monkeypatch):
     resp = await _post_file(client, content=b"x" * (2 * 1024 * 1024))
     assert resp.status_code == 413
     assert resp.json()["detail"] == "upload exceeds size limit"
-    assert not up.uploads_dir(app.state.sandbox.workspace_for("t-up")).exists()
+    assert not up.uploads_dir(app.state.sandbox.workspace_for("tester", "t-up")).exists()
 
 
 async def test_api_upload_count_cap_409(client, monkeypatch):

@@ -6,7 +6,7 @@ from pathlib import PurePosixPath
 
 from langchain.tools import tool
 
-from app.context import get_thread_id
+from app.context import get_thread_id, get_username
 from app.sandbox import DockerSandbox
 
 
@@ -40,8 +40,10 @@ def build_execution_tools(sandbox: DockerSandbox):
         if not command.strip():
             raise ValueError("command must not be empty")
 
+        username = get_username()
         thread_id = get_thread_id()
         result = await sandbox.run(
+            user=username,
             thread_id=thread_id,
             command=command,
             timeout_seconds=timeout_seconds,
@@ -60,8 +62,10 @@ def build_execution_tools(sandbox: DockerSandbox):
         if len(code) > 100_000:
             raise ValueError("code is too large; maximum is 100000 characters")
 
+        username = get_username()
         thread_id = get_thread_id()
         result = await sandbox.run(
+            user=username,
             thread_id=thread_id,
             command="python -",
             stdin_data=code,
@@ -88,8 +92,10 @@ def build_execution_tools(sandbox: DockerSandbox):
             ]
         )
 
+        username = get_username()
         thread_id = get_thread_id()
         result = await sandbox.run(
+            user=username,
             thread_id=thread_id,
             command=shell_command,
             timeout_seconds=timeout_seconds,
