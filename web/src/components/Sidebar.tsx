@@ -6,25 +6,29 @@ type Props = {
   threads: Thread[];
   activeId: string | null;
   streamingIds: Set<string>;
+  username: string;
   onNew: () => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
+  onLogout: () => void;
 };
 
 export default function Sidebar({
   threads,
   activeId,
   streamingIds,
+  username,
   onNew,
   onSelect,
   onDelete,
+  onLogout,
 }: Props) {
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r border-[#ececec] bg-[#f9f9f9]">
       <div className="px-4 pb-2 pt-5">
         <h1
           className="text-lg font-semibold tracking-tight text-gray-900"
-          title="服务重启后模型不记得历史(对话记录仅保存在本浏览器)"
+          title="模型记忆按用户保存在服务端数据库，重启不丢失；本浏览器仅保存界面历史"
         >
           MyAgent
         </h1>
@@ -72,6 +76,18 @@ export default function Sidebar({
           );
         })}
       </nav>
+
+      <div className="flex items-center justify-between border-t border-[#ececec] px-4 py-3">
+        <span className="truncate text-sm text-gray-600" title={username}>
+          {username}
+        </span>
+        <button
+          onClick={onLogout}
+          className="shrink-0 text-xs text-gray-400 transition hover:text-gray-700"
+        >
+          退出登录
+        </button>
+      </div>
     </aside>
   );
 }

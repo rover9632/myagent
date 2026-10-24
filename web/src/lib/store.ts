@@ -1,7 +1,13 @@
 import { markInterrupted } from './reducer';
 import type { ChatMessage, Thread } from './types';
 
-const KEY = 'myagent.threads.v1';
+export function storeKey(username: string): string {
+  // username matches ^[a-zA-Z0-9_-]{3,32}$ (backend-enforced) -> safe in a
+  // storage key. Threads are namespaced per user so shared browsers never
+  // leak history across accounts. The legacy global key ('myagent.threads.v1')
+  // is left orphaned on purpose.
+  return `myagent.threads.${username}.v1`;
+}
 
 export type Store = { v: 1; threads: Thread[]; activeId: string | null };
 
@@ -25,10 +31,10 @@ function repair(msg: ChatMessage): ChatMessage {
   return msg;
 }
 
-export function loadStore(): Store {
+export function loadStore(username: string): Store {
   if (typeof window === 'undefined') return emptyStore();
   try {
-    const raw = window.localStorage.getItem(KEY);
+    const raw = window.localStorage.getItem(storeKey(username));
     if (!raw) return emptyStore();
     const parsed = JSON.parse(raw) as Store;
     if (parsed.v !== 1 || !Array.isArray(parsed.threads)) return emptyStore();
@@ -44,11 +50,12 @@ export function loadStore(): Store {
 
 // Persistence with quota handling: on QuotaExceededError, evict the oldest
 // non-active threads and retry; as a last resort drop the oldest tool payloads.
-export function saveStore(store: Store): boolean {
+export function saveStore(username: string, store: Store): boolean {
   if (typeof window === 'undefined') return false;
+  const key = storeKey(username);
   const attempt = (s: Store): boolean => {
     try {
-      window.localStorage.setItem(KEY, JSON.stringify(s));
+      window.localStorage.setItem(key, JSON.stringify(s));
       return true;
     } catch {
       return false;

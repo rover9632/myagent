@@ -1,19 +1,18 @@
 import { NextRequest } from 'next/server';
 
+import { backendUrl, browserAuth, notConfigured, relayError, unauthorized } from '@/lib/backend';
+
 // Same-origin proxy to the FastAPI backend. Two jobs:
-// 1. Inject the bearer token server-side (never ships to the browser).
+// 1. Forward the BROWSER's Authorization header (per-user login sessions);
+//    no server-side secret anymore.
 // 2. Forward the client's abort signal so closing the tab/Stop button cancels
 //    the upstream LangGraph run instead of letting it burn sandbox minutes.
 // NOTE: no `runtime`/`dynamic` segment configs — with cacheComponents enabled
 // (Next 16) they are errors, and POST handlers already run per-request.
 
 export async function POST(req: NextRequest): Promise<Response> {
-  const backendUrl = process.env.BACKEND_URL;
-  const token = process.env.BACKEND_API_TOKEN;
-  if (!backendUrl || !token) {
-    console.error('api/chat: BACKEND_URL / BACKEND_API_TOKEN not configured');
-    return Response.json({ error: 'backend not configured' }, { status: 500 });
-  }
+  const base = backendUrl();
+  if (!base) return notConfigured('api/chat');
 
   let body: { message?: unknown; thread_id?: unknown; attachments?: unknown };
   try {
@@ -54,13 +53,18 @@ export async function POST(req: NextRequest): Promise<Response> {
     attachments = raw.map(({ name, path }) => ({ name, path }));
   }
 
+  // AFTER body validation so page.tsx's `POST '{}'` probe still sees 422 (≠500)
+  // when BACKEND_URL is configured, regardless of auth state.
+  const authorization = browserAuth(req);
+  if (!authorization) return unauthorized('api/chat');
+
   let upstream: Response;
   try {
-    upstream = await fetch(`${backendUrl.replace(/\/$/, '')}/v1/agent/chat/stream`, {
+    upstream = await fetch(`${base}/v1/agent/chat/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
+        Authorization: authorization,
       },
       body: JSON.stringify({
         message,
@@ -70,11 +74,7 @@ export async function POST(req: NextRequest): Promise<Response> {
       signal: req.signal,
     });
   } catch (err) {
-    if ((err as Error)?.name === 'AbortError') {
-      return new Response(null, { status: 499 });
-    }
-    console.error('api/chat: upstream fetch failed:', err);
-    return Response.json({ error: 'backend unreachable' }, { status: 502 });
+    return relayError(err, 'api/chat');
   }
 
   // Non-stream errors (401/422/…) pass through as plain text — safe to buffer

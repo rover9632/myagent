@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { authHeader } from '@/lib/auth';
 import { applyEvent, finalize, localId, markInterrupted, newAssistantMessage } from '@/lib/reducer';
 import { parseSSE } from '@/lib/sse';
 import { createThread, deriveTitle, emptyStore, loadStore, saveStore, type Store } from '@/lib/store';
@@ -10,7 +11,10 @@ import { uploadFile as postUpload, type StoredAttachment } from '@/lib/uploads';
 
 type AssistantMsg = Extract<ChatMessage, { role: 'assistant' }>;
 
-export function useChat() {
+export function useChat(
+  auth: { token: string; username: string },
+  onUnauthorized: () => void,
+) {
   const [store, setStore] = useState<Store>(emptyStore());
   const [hydrated, setHydrated] = useState(false);
   const [streamingIds, setStreamingIds] = useState<Set<string>>(new Set());
@@ -25,21 +29,24 @@ export function useChat() {
 
   // Trailing-throttled persistence; beforeunload flushes mid-stream bytes so a
   // refresh keeps the partial reply (store.load repairs it on next open).
+  // Storage is namespaced per logged-in user.
   useEffect(() => {
     if (!hydrated) return;
-    const id = setTimeout(() => saveStore(store), 600);
+    const id = setTimeout(() => saveStore(auth.username, store), 600);
     return () => clearTimeout(id);
-  }, [store, hydrated]);
+  }, [store, hydrated, auth.username]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const flush = () => saveStore(storeRef.current);
+    const flush = () => saveStore(auth.username, storeRef.current);
     window.addEventListener('beforeunload', flush);
     return () => window.removeEventListener('beforeunload', flush);
-  }, []);
+  }, [auth.username]);
 
   useEffect(() => {
-    const loaded = loadStore();
+    // Mount-only hydration: ChatApp is remounted per login (key={username}),
+    // so auth.username can never change during this hook's lifetime.
+    const loaded = loadStore(auth.username);
     if (loaded.threads.length === 0) {
       const t = createThread();
       loaded.threads = [t];
@@ -52,6 +59,7 @@ export function useChat() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStore(loaded);
     setHydrated(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const patchThread = useCallback((threadId: string, fn: (t: Thread) => Thread) => {
@@ -115,11 +123,21 @@ export function useChat() {
 
   // Uploads always target the ACTIVE thread, read at call time from the ref so
   // the Composer never needs the id plumbed through a stale closure.
-  const uploadFileForActiveThread = useCallback(async (file: File): Promise<StoredAttachment> => {
-    const threadId = storeRef.current.activeId;
-    if (!threadId) throw new Error('没有活动会话');
-    return postUpload(threadId, file);
-  }, []);
+  const uploadFileForActiveThread = useCallback(
+    async (file: File): Promise<StoredAttachment> => {
+      const threadId = storeRef.current.activeId;
+      if (!threadId) throw new Error('没有活动会话');
+      try {
+        return await postUpload(threadId, file, auth.token);
+      } catch (err) {
+        // uploads.ts throws `${status}: ${text}` — a dead session must surface
+        // as a logout, not just a chip error.
+        if ((err as Error).message.startsWith('401')) onUnauthorized();
+        throw err;
+      }
+    },
+    [auth.token, onUnauthorized],
+  );
 
   const send = useCallback(
     async (text: string, attachments?: StoredAttachment[]) => {
@@ -171,7 +189,7 @@ export function useChat() {
       try {
         const res = await fetch('/api/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeader(auth.token) },
           body: JSON.stringify({
             message: trimmed,
             thread_id: threadId,
@@ -184,6 +202,13 @@ export function useChat() {
           signal: controller.signal,
         });
         if (!res.ok || !res.body) {
+          if (res.status === 401) {
+            // Session expired/revoked server-side: finalize the bubble and
+            // fall back to the login gate.
+            commit({ ...finalize(live), error: '登录已过期，请重新登录' });
+            onUnauthorized();
+            return;
+          }
           const detail = await res.text().catch(() => '');
           commit({
             ...finalize(live),
@@ -209,7 +234,7 @@ export function useChat() {
         if (abortRef.current === controller) abortRef.current = null;
       }
     },
-    [setStreaming, patchAssistant],
+    [setStreaming, patchAssistant, auth.token, onUnauthorized],
   );
 
   const stop = useCallback(() => {

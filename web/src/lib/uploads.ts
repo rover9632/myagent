@@ -1,5 +1,7 @@
 // Attachment upload helpers shared by the Composer chips and useChat.
 
+import { authHeader } from './auth';
+
 // Keep in sync with backend settings.upload_max_bytes (client check is a
 // courtesy; the proxy + backend enforce the real limit).
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -27,12 +29,16 @@ export function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export async function uploadFile(threadId: string, file: File): Promise<StoredAttachment> {
+export async function uploadFile(
+  threadId: string,
+  file: File,
+  token: string,
+): Promise<StoredAttachment> {
   const form = new FormData();
   form.append('file', file);
   form.append('thread_id', threadId);
   // No Content-Type header: the browser sets multipart/form-data with boundary.
-  const res = await fetch('/api/files', { method: 'POST', body: form });
+  const res = await fetch('/api/files', { method: 'POST', body: form, headers: authHeader(token) });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`${res.status}: ${text.slice(0, 200)}`);
