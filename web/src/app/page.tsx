@@ -46,6 +46,7 @@ export default function Home() {
         backendReady={configured !== false}
         onSend={chat.send}
         onStop={chat.stop}
+        onUploadFile={chat.uploadFile}
       />
     </div>
   );

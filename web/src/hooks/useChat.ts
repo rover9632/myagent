@@ -6,6 +6,7 @@ import { applyEvent, finalize, localId, markInterrupted, newAssistantMessage } f
 import { parseSSE } from '@/lib/sse';
 import { createThread, deriveTitle, emptyStore, loadStore, saveStore, type Store } from '@/lib/store';
 import type { ChatMessage, Thread } from '@/lib/types';
+import { uploadFile as postUpload, type StoredAttachment } from '@/lib/uploads';
 
 type AssistantMsg = Extract<ChatMessage, { role: 'assistant' }>;
 
@@ -112,8 +113,16 @@ export function useChat() {
     streamingIdsRef.current = [...streamingIds];
   }, [streamingIds]);
 
+  // Uploads always target the ACTIVE thread, read at call time from the ref so
+  // the Composer never needs the id plumbed through a stale closure.
+  const uploadFileForActiveThread = useCallback(async (file: File): Promise<StoredAttachment> => {
+    const threadId = storeRef.current.activeId;
+    if (!threadId) throw new Error('没有活动会话');
+    return postUpload(threadId, file);
+  }, []);
+
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, attachments?: StoredAttachment[]) => {
       const trimmed = text.trim();
       if (!trimmed || trimmed.length > 20000) return;
       if (streamingIdsRef.current.length > 0) return; // one stream at a time
@@ -121,7 +130,13 @@ export function useChat() {
       // Build the new thread state synchronously from the latest snapshot.
       const cur = storeRef.current;
       let thread = cur.threads.find((t) => t.id === cur.activeId) ?? createThread();
-      const userMsg: ChatMessage = { role: 'user', id: localId('u'), text: trimmed, ts: Date.now() };
+      const userMsg: ChatMessage = {
+        role: 'user',
+        id: localId('u'),
+        text: trimmed,
+        ts: Date.now(),
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
+      };
       const assistant = newAssistantMessage();
       thread = {
         ...thread,
@@ -157,7 +172,15 @@ export function useChat() {
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: trimmed, thread_id: threadId }),
+          body: JSON.stringify({
+            message: trimmed,
+            thread_id: threadId,
+            // Echo only {name, path}; the backend validates paths against the
+            // workspace and merges them with a directory scan.
+            ...(attachments && attachments.length > 0
+              ? { attachments: attachments.map(({ name, path }) => ({ name, path })) }
+              : {}),
+          }),
           signal: controller.signal,
         });
         if (!res.ok || !res.body) {
@@ -207,5 +230,6 @@ export function useChat() {
     deleteThread,
     send,
     stop,
+    uploadFile: uploadFileForActiveThread,
   };
 }

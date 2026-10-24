@@ -15,7 +15,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     return Response.json({ error: 'backend not configured' }, { status: 500 });
   }
 
-  let body: { message?: unknown; thread_id?: unknown };
+  let body: { message?: unknown; thread_id?: unknown; attachments?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -31,6 +31,29 @@ export async function POST(req: NextRequest): Promise<Response> {
     return Response.json({ error: 'invalid thread_id' }, { status: 422 });
   }
 
+  // Optional echo of previously uploaded files; shallow-validate and forward.
+  // The backend re-validates every path against the thread workspace.
+  let attachments: { name: string; path: string }[] | null = null;
+  if (body.attachments != null) {
+    const raw = body.attachments;
+    const ok =
+      Array.isArray(raw) &&
+      raw.length <= 50 &&
+      raw.every(
+        (a): a is { name: string; path: string } =>
+          typeof a === 'object' &&
+          a !== null &&
+          typeof (a as { name?: unknown }).name === 'string' &&
+          (a as { name: string }).name.length >= 1 &&
+          (a as { name: string }).name.length <= 200 &&
+          typeof (a as { path?: unknown }).path === 'string' &&
+          (a as { path: string }).path.length >= 1 &&
+          (a as { path: string }).path.length <= 300,
+      );
+    if (!ok) return Response.json({ error: 'invalid attachments' }, { status: 422 });
+    attachments = raw.map(({ name, path }) => ({ name, path }));
+  }
+
   let upstream: Response;
   try {
     upstream = await fetch(`${backendUrl.replace(/\/$/, '')}/v1/agent/chat/stream`, {
@@ -39,7 +62,11 @@ export async function POST(req: NextRequest): Promise<Response> {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ message, thread_id: threadId ?? null }),
+      body: JSON.stringify({
+        message,
+        thread_id: threadId ?? null,
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
+      }),
       signal: req.signal,
     });
   } catch (err) {

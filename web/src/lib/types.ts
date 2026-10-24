@@ -1,5 +1,7 @@
 // Wire + domain types shared by the SSE client, reducer and store.
 
+import type { StoredAttachment } from './uploads';
+
 export type SandboxResult = {
   exit_code: number;
   stdout: string;
@@ -34,7 +36,8 @@ export type Seg =
     };
 
 export type ChatMessage =
-  | { role: 'user'; id: string; text: string; ts: number }
+  // attachments is optional: pre-upload localStorage data loads unchanged.
+  | { role: 'user'; id: string; text: string; ts: number; attachments?: StoredAttachment[] }
   | {
       role: 'assistant';
       id: string;

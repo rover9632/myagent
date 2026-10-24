@@ -5,16 +5,25 @@ import { useEffect, useRef } from 'react';
 import Composer from './Composer';
 import MessageRow from './MessageRow';
 import type { Thread } from '@/lib/types';
+import type { StoredAttachment } from '@/lib/uploads';
 
 type Props = {
   thread: Thread | null;
   streaming: boolean;
   backendReady: boolean;
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments?: StoredAttachment[]) => void;
   onStop: () => void;
+  onUploadFile: (file: File) => Promise<StoredAttachment>;
 };
 
-export default function ChatWindow({ thread, streaming, backendReady, onSend, onStop }: Props) {
+export default function ChatWindow({
+  thread,
+  streaming,
+  backendReady,
+  onSend,
+  onStop,
+  onUploadFile,
+}: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
 
@@ -57,7 +66,16 @@ export default function ChatWindow({ thread, streaming, backendReady, onSend, on
           </div>
         )}
       </div>
-      <Composer streaming={streaming} disabled={!backendReady} onSend={onSend} onStop={onStop} />
+      {/* key: switching threads remounts the Composer, dropping unsent chips */}
+      <Composer
+        key={thread?.id ?? 'none'}
+        streaming={streaming}
+        disabled={!backendReady}
+        threadId={thread?.id ?? null}
+        onSend={onSend}
+        onStop={onStop}
+        onUploadFile={onUploadFile}
+      />
     </div>
   );
 }
