@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     port: int = Field(default=8061, ge=1, le=65535)
     log_level: str = Field(default="INFO")
 
+    # COS
+    cos_conf: dict[str, str] = Field(default_factory=dict)
+    cos_bucket: str = Field(default="")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
