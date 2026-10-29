@@ -11,6 +11,9 @@ _TOOL_NAMES = {
     "bash_exec",
     "python_exec",
     "python_run_script",
+    "genpass",
+    "imgs_to_pdf",
+    "pdf_to_images",
 }
 
 

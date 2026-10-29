@@ -8,6 +8,9 @@ from app.agent.prompts import SYSTEM_PROMPT
 from app.config import Settings
 from app.sandbox import DockerSandbox
 from app.tools.execution import build_execution_tools
+from app.tools.genpass import build_genpass_tools
+from app.tools.imgs2pdf import build_imgs2pdf_tools
+from app.tools.pdf2imgs import build_pdf2imgs_tools
 from app.tools.web import build_web_tools
 
 
@@ -35,6 +38,11 @@ def build_agent(
             max_results=settings.tavily_max_results,
         ),
         *build_execution_tools(sandbox),
+        # Host-side file tools: they run in the FastAPI process directly on
+        # the session workspace and return cloud URLs for generated files.
+        *build_genpass_tools(),
+        *build_imgs2pdf_tools(sandbox),
+        *build_pdf2imgs_tools(sandbox),
     ]
 
     return create_agent(
