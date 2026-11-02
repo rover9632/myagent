@@ -48,6 +48,28 @@ async def _workspace_cleanup_loop(sandbox: DockerSandbox, interval_seconds: int 
         await asyncio.sleep(interval_seconds)
 
 
+async def _assert_schema(pool: AsyncConnectionPool) -> None:
+    """Fail fast when Alembic hasn't created the app tables yet.
+
+    Migrations are manual (`uv run alembic upgrade head`); without this check a
+    forgotten migration would surface as a 500 UndefinedTable on first login.
+    """
+    async with pool.connection() as conn, conn.cursor() as cur:
+        # Aliases matter: dict_row keys both columns `to_regclass` otherwise
+        # and the second silently overwrites the first.
+        await cur.execute(
+            "SELECT to_regclass('public.users') AS users, "
+            "to_regclass('public.sessions') AS sessions"
+        )
+        row = await cur.fetchone()
+    missing = [name for name in ("users", "sessions") if row[name] is None]
+    if missing:
+        raise RuntimeError(
+            f"missing database table(s): {', '.join(missing)} — "
+            "run `uv run alembic upgrade head` before starting the backend"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     sandbox = DockerSandbox(
@@ -80,8 +102,9 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         raise RuntimeError(f"Postgres unavailable at startup: {exc}") from exc
 
+    await _assert_schema(pool)  # users/sessions are owned by Alembic, not created here
+
     user_store = UserStore(pool, session_ttl_days=settings.session_ttl_days)
-    await user_store.bootstrap()  # CREATE TABLE IF NOT EXISTS users/sessions
 
     checkpointer = AsyncPostgresSaver(pool)  # ctor needs a running loop → here, not import time
     await checkpointer.setup()  # idempotent checkpoint-table migrations

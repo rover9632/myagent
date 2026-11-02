@@ -89,9 +89,6 @@ class FakeUserStore:
         self._next_id = 1
         self.session_ttl_days = session_ttl_days
 
-    async def bootstrap(self) -> None:  # no-op: nothing to create in memory
-        pass
-
     async def create_user(self, username: str, password: str) -> User:
         if username.lower() in {u.lower() for u in self.users}:
             raise DuplicateUsername(username)

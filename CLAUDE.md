@@ -13,6 +13,8 @@ uv run pytest tests/test_auth_api.py -q          # one file
 uv run pytest -k test_login -q                   # pattern match
 uv run ruff check .                              # lint (line-length 100; rules E,F,I,B,UP)
 
+uv run alembic upgrade head                        # schema migrations (manual CLI; run from repo root, before booting after any schema change)
+
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8061   # backend (needs .env PG_URI + sandbox image)
 docker build -t agent-sandbox:py312 ./sandbox-image        # sandbox image
 
@@ -30,7 +32,7 @@ cd web && npm run build && npx eslint src        # frontend gates
 
 ## Backend architecture (app/)
 
-- **Wiring is all in `main.py` lifespan**: `DockerSandbox.check_available()` → one psycopg3 `AsyncConnectionPool` (kwargs: `autocommit=True, prepare_threshold=None, row_factory=dict_row`) **shared by UserStore and AsyncPostgresSaver** → `build_agent(settings, sandbox, checkpointer)` → `app.state.{pool,user_store,agent_service,sandbox}` + hourly workspace-cleanup task. Startup fails fast (RuntimeError) when Docker or PG is unreachable; tables are created idempotently on boot (`CREATE TABLE IF NOT EXISTS` + saver `setup()`, no alembic).
+- **Wiring is all in `main.py` lifespan**: `DockerSandbox.check_available()` → one psycopg3 `AsyncConnectionPool` (kwargs: `autocommit=True, prepare_threshold=None, row_factory=dict_row`) **shared by UserStore and AsyncPostgresSaver** → `build_agent(settings, sandbox, checkpointer)` → `app.state.{pool,user_store,agent_service,sandbox}` + hourly workspace-cleanup task. Startup fails fast (RuntimeError) when Docker or PG is unreachable; the users/sessions schema is owned by Alembic (manual `uv run alembic upgrade head`; single source of truth `app/db_schema.py`, guarded baseline revision 0001 runs the legacy DDL verbatim) and lifespan only checks table existence via `to_regclass` (`_assert_schema`); `checkpoint*` tables are still created by saver `setup()` on boot — alembic's `include_object` filter in `alembic/env.py` keeps them out of autogenerate.
 - **Request flow**: `/v1/agent/chat/stream` → `require_user` dependency (session Bearer → `User`) → `AgentService.stream()` sets `username`+`thread_id` **contextvars** → LangGraph agent streams SSE events `start/tool_start/tool_end/token/error/done` (`start`/`done` echo the *client* thread_id).
 - **Tools never receive user/thread as parameters**: `app/tools/execution.py` reads them via `app/context.py` contextvars (`get_username()`/`get_thread_id()`, both raise RuntimeError when unbound) and calls `sandbox.run(user=..., thread_id=...)`.
 - **Memory namespacing**: checkpointer key is `f"{username}:{thread_id}"` — client-supplied thread_ids can't collide across users. The username regex `^[a-zA-Z0-9_-]{3,32}$` deliberately excludes `:` (keep it that way).

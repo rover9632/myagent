@@ -30,28 +30,6 @@ class User:
     username: str
 
 
-# Executed one-by-one (never as a multi-statement string). Idempotent — safe on
-# every startup. No alembic (MVP).
-DDL_STATEMENTS: tuple[str, ...] = (
-    """CREATE TABLE IF NOT EXISTS users (
-           id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-           username      TEXT NOT NULL,
-           password_hash TEXT NOT NULL,
-           created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-       )""",
-    "CREATE UNIQUE INDEX IF NOT EXISTS users_username_uidx ON users (username)",
-    # Case-insensitive uniqueness without the citext extension (anti-impersonation).
-    "CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_uidx ON users (lower(username))",
-    """CREATE TABLE IF NOT EXISTS sessions (
-           token_hash TEXT PRIMARY KEY,
-           user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-           expires_at TIMESTAMPTZ NOT NULL,
-           created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-       )""",
-    "CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions (expires_at)",
-)
-
-
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -78,7 +56,9 @@ class UserStore:
 
     The pool is configured with autocommit=True + dict_row, so every execute
     stands alone and rows come back as dicts. These methods are the contract
-    FakeUserStore mirrors in tests.
+    FakeUserStore mirrors in tests. Schema creation is NOT this layer's job:
+    the users/sessions tables are owned by Alembic (``alembic/versions/``,
+    run ``uv run alembic upgrade head`` before booting after any schema change).
     """
 
     def __init__(
@@ -93,11 +73,6 @@ class UserStore:
         self.bcrypt_rounds = bcrypt_rounds
         self._last_purge = 0.0
         self._dummy_hash: str | None = None
-
-    async def bootstrap(self) -> None:
-        async with self.pool.connection() as conn, conn.cursor() as cur:
-            for stmt in DDL_STATEMENTS:
-                await cur.execute(stmt)
 
     async def create_user(self, username: str, password: str) -> User:
         hashed = await asyncio.to_thread(hash_password, password, rounds=self.bcrypt_rounds)

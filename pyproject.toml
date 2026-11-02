@@ -5,6 +5,7 @@ description = "Minimal agent MVP with LangChain create_agent, vLLM, Tavily, Dock
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.16,<2.0",
     "bcrypt>=5.0,<6",
     "cos-python-sdk-v5>=1.9.44",
     "fastapi>=0.135.0,<1.0",
@@ -20,6 +21,7 @@ dependencies = [
     "pydantic-settings>=2.7,<3.0",
     "pymupdf>=2.0",
     "python-multipart>=0.0.20,<1.0",
+    "sqlalchemy>=2.0.40,<2.1",
     "uvicorn[standard]>=0.35,<1.0",
 ]
 
@@ -34,6 +36,9 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# generated migration files carry their own formatting (alembic templates,
+# byte-identical legacy DDL strings); don't churn them
+exclude = ["alembic"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

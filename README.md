@@ -39,7 +39,7 @@ FastAPI 服务本身建议运行在宿主机；Docker 仅用于执行 Agent 生�
 - Python 3.12+
 - uv
 - Docker Engine
-- PostgreSQL 17+（用户、会话与对话记忆；启动时自动建表）
+- PostgreSQL 17+（用户、会话与对话记忆；users/sessions 表由 alembic 迁移创建，checkpoint 表启动时自动创建）
 - 一个支持 OpenAI-compatible Chat Completions + tool calling 的 vLLM 服务
 - Tavily API Key
 
@@ -66,7 +66,15 @@ SESSION_TTL_DAYS=30
 
 `LLM_MODEL` 必须与 vLLM 实际暴露的 model 名称一致。
 
-`PG_URI` 使用标准 libpq URI 写法（`postgresql://user:password@host:port/dbname`），不接受 SQLAlchemy 方言（如 `postgresql+asyncpg://`）。
+`PG_URI` 使用标准 libpq URI 写法（`postgresql://user:password@host:port/dbname`），不接受 SQLAlchemy 方言（如 `postgresql+asyncpg://`）。alembic 会自动把它转成 psycopg3 同步方言，无需改写 `.env`。
+
+初始化数据库 schema（在仓库根执行；全新库与老库都直接跑同一条命令）：
+
+```bash
+uv run alembic upgrade head
+```
+
+`users`/`sessions` 表由 alembic 管理（schema 事实来源在 `app/db_schema.py`，改表后 `uv run alembic revision --autogenerate -m "..."` 并人审生成文件）；`checkpoint*` 表仍由 AsyncPostgresSaver 启动时自建。
 
 鉴权模型：所有 `/v1/agent/*` 端点要求**用户会话 Bearer 令牌**（先经 `/v1/auth/register` 或 `/v1/auth/login` 获取）。`/healthz` 与 `/v1/auth/register`、`/v1/auth/login` 开放；`/healthz` 仅返回模型名，不泄露 LLM base_url。会话默认 30 天过期（`SESSION_TTL_DAYS`），数据库中只保存令牌的 sha256 哈希。
 
@@ -292,7 +300,8 @@ uv run ruff check .
 72 字节边界、SSE 端点事件框架与会话鉴权（401/200）、checkpoint 按用户
 命名空间、事件映射、执行工具的 JSON 契约与路径安全、两级 workspace 及其 TTL 清理、
 跨用户文件隔离、退出码信号语义。数据库层用内存 `FakeUserStore` + FastAPI dependency
-override 替身，**不连真实 PostgreSQL**；真实 SQL 与 bcrypt 由启动自检和冒烟脚本覆盖。
+override 替身，**不连真实 PostgreSQL**；真实 SQL 与 bcrypt 由冒烟脚本覆盖（启动自检仅确认
+users/sessions 表存在并提示跑迁移）。
 真 Docker 集成测试存在但会在缺少 docker/镜像时自动跳过。
 
 ## 16. 生产化时优先改造
@@ -301,10 +310,9 @@ override 替身，**不连真实 PostgreSQL**；真实 SQL 与 bcrypt 由启动�
 2. 会话令牌改用 httpOnly cookie 方案替代 localStorage（消除 XSS 窃取面；当前 Bearer 头天然免疫 CSRF）
 3. 会话刷新（refresh token）、单用户并发会话上限与「登出所有设备」
 4. 用户注销与数据清理（级联删除 sessions/checkpoints/workspaces）
-5. 用 alembic 管理 schema 迁移（当前为启动时 `CREATE TABLE IF NOT EXISTS`，只增不改）
-6. 为工具增加权限策略和 Human-in-the-loop（web_search 注入指令 -> 沙箱执行是最高危路径）
-7. sandbox 改成独立 worker / microVM / 专用执行服务
-8. 增加执行配额、并发限制与限流（会话鉴权与 workspace TTL 清理已内置）
-9. 接入 LangSmith tracing / evaluation
-10. SSE 增加 request_id、tool_call_id、usage、重试和取消机制
-11. 对 `web_search` 增加 `open_url` / extract，形成搜索 -> 阅读网页流程
+5. 为工具增加权限策略和 Human-in-the-loop（web_search 注入指令 -> 沙箱执行是最高危路径）
+6. sandbox 改成独立 worker / microVM / 专用执行服务
+7. 增加执行配额、并发限制与限流（会话鉴权与 workspace TTL 清理已内置）
+8. 接入 LangSmith tracing / evaluation
+9. SSE 增加 request_id、tool_call_id、usage、重试和取消机制
+10. 对 `web_search` 增加 `open_url` / extract，形成搜索 -> 阅读网页流程
