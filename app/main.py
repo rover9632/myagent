@@ -17,6 +17,7 @@ from app.agent import AgentService, build_agent
 from app.auth import User, require_user
 from app.auth_api import router as auth_router
 from app.config import get_settings
+from app.db.session import build_engine, build_sessionmaker
 from app.sandbox import DockerSandbox
 from app.schemas import ChatRequest, UploadResponse
 from app.uploads import (
@@ -94,17 +95,24 @@ async def lifespan(app: FastAPI):
         kwargs={
             "autocommit": True,  # required by AsyncPostgresSaver for pools
             "prepare_threshold": None,  # required pattern; also pgbouncer-safe
-            "row_factory": dict_row,  # required by the saver; handy for UserStore
+            "row_factory": dict_row,  # required by the saver
         },
     )
+    # Separate SQLAlchemy engine for the ORM data layer (UserStore et al.);
+    # the psycopg pool above stays dedicated to AsyncPostgresSaver.
+    engine = build_engine()
+
     try:
         await pool.open(wait=True)  # fail fast on bad credentials/host
     except Exception as exc:
+        await engine.dispose()
         raise RuntimeError(f"Postgres unavailable at startup: {exc}") from exc
 
     await _assert_schema(pool)  # users/sessions are owned by Alembic, not created here
 
-    user_store = UserStore(pool, session_ttl_days=settings.session_ttl_days)
+    user_store = UserStore(
+        build_sessionmaker(engine), session_ttl_days=settings.session_ttl_days
+    )
 
     checkpointer = AsyncPostgresSaver(pool)  # ctor needs a running loop → here, not import time
     await checkpointer.setup()  # idempotent checkpoint-table migrations
@@ -123,6 +131,7 @@ async def lifespan(app: FastAPI):
         cleanup_task.cancel()
         with suppress(asyncio.CancelledError):
             await cleanup_task
+        await engine.dispose()
         await pool.close()
 
 

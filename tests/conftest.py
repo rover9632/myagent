@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -84,16 +85,14 @@ class FakeUserStore:
     """
 
     def __init__(self, session_ttl_days: int = 30) -> None:
-        self.users: dict[str, tuple[int, str]] = {}  # username -> (id, password)
-        self.sessions: dict[str, tuple[int, datetime]] = {}  # token -> (user_id, expires_at)
-        self._next_id = 1
+        self.users: dict[str, tuple[UUID, str]] = {}  # username -> (id, password)
+        self.sessions: dict[str, tuple[UUID, datetime]] = {}  # token -> (user_id, expires_at)
         self.session_ttl_days = session_ttl_days
 
     async def create_user(self, username: str, password: str) -> User:
         if username.lower() in {u.lower() for u in self.users}:
             raise DuplicateUsername(username)
-        uid = self._next_id
-        self._next_id += 1
+        uid = uuid4()
         self.users[username] = (uid, password)
         return User(id=uid, username=username)
 
@@ -105,7 +104,7 @@ class FakeUserStore:
                 return User(id=uid, username=name) if pw == password else None
         return None
 
-    async def create_session(self, user_id: int) -> tuple[str, datetime]:
+    async def create_session(self, user_id: UUID) -> tuple[str, datetime]:
         token = secrets.token_urlsafe(32)  # real generator: exercises the same flow
         expires = datetime.now(UTC) + timedelta(days=self.session_ttl_days)
         self.sessions[token] = (user_id, expires)
@@ -136,7 +135,7 @@ def logged_in(app, username: str = "tester"):
     tests (test_auth_api.py) skip the override and set app.state.user_store only.
     """
     app.state.user_store = FakeUserStore()
-    app.dependency_overrides[require_user] = lambda: User(id=1, username=username)
+    app.dependency_overrides[require_user] = lambda: User(id=uuid4(), username=username)
     try:
         yield app.state.user_store
     finally:

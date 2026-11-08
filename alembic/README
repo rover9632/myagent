@@ -2,6 +2,9 @@ Generic single-database configuration.
 
 # 常用命令
 
+## 检查 Model 与数据库是否存在 Schema 差异
+uv run alembic check
+
 ## 生成迁移文件
 uv run alembic revision --autogenerate -m "<msg>"
 

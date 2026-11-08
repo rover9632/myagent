@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Index,
     String,
+    func,
 )
 from sqlalchemy.dialects.postgresql import INET, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -108,3 +109,10 @@ class User(Base, TimestampMixin):
         passive_deletes=True,
         lazy="raise",
     )
+
+
+# Case-insensitive uniqueness without the citext extension (anti-impersonation);
+# carried over from the retired hand-written baseline. Declared post-class
+# because it needs the column object. Functional indexes are the classic
+# autogenerate phantom-diff source -- read generated revisions before upgrading.
+Index("ix_users_username_lower", func.lower(User.username), unique=True)
