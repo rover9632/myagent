@@ -1,6 +1,6 @@
 """${message}
 
-Scope: users/sessions only -- checkpoint* tables belong to langgraph's setup().
+Scope: all tables except checkpoint* -- checkpoint* tables belong to langgraph's setup().
 
 Revision ID: ${up_revision}
 Revises: ${down_revision | comma,n}

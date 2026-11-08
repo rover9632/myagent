@@ -1,1 +1,21 @@
 Generic single-database configuration.
+
+# 常用命令
+
+## 生成迁移文件
+uv run alembic revision --autogenerate -m "<msg>"
+
+## 执行迁移
+uv run alembic upgrade head
+
+## 查看当前数据库版本
+uv run alembic current
+
+## 查看迁移历史
+uv run alembic history
+
+## 回滚一个版本
+uv run alembic downgrade -1
+
+## 查看待执行 SQL
+uv run alembic upgrade head --sql

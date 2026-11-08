@@ -1,27 +1,35 @@
-"""Alembic environment: users/sessions schema only.
+"""Alembic environment: app-owned tables, sourced from the ORM models.
+
+The single source of truth is `app.db.base.Base.metadata`, populated by
+importing `app.dbmodels` (each module registers its table on Base). Edit a
+model, then `alembic revision --autogenerate` -- there is no hand-maintained
+Core metadata anymore (the old app/db_schema.py is retired).
 
 The checkpoint* tables belong to AsyncPostgresSaver.setup() (its own
 checkpoint_migrations ledger); the include_object filter below is the load-
 bearing guard that keeps autogenerate from ever proposing DROP TABLE for them.
 
-Never import app.main here -- app.config + app.db_schema have no side effects
-beyond reading .env, but app.main would wire the whole lifespan. Migrations
-therefore must run from the repo root (same CWD convention as uvicorn).
+Never import app.main here -- importing the engine in app.db.session would
+build a live connection pool at migration time, and app.main would wire the
+whole lifespan. Migrations therefore must run from the repo root (same CWD
+convention as uvicorn) so .env is picked up by app.config.
 """
 
 from __future__ import annotations
 
+import app.dbmodels  # noqa: F401  (registers every model on Base.metadata)
 from alembic import context
 from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
-from app.db_schema import metadata as target_metadata
+from app.db.base import Base
 
 config = context.config
+target_metadata = Base.metadata
 
 
-def _include_object(name, type_, reflected, compare_to) -> bool:
+def _include_object(object, name, type_, reflected, compare_to) -> bool:
     """Only tables declared in our metadata participate in autogenerate."""
     if type_ == "table":
         return name in target_metadata.tables
