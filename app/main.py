@@ -18,6 +18,7 @@ from app.auth import User, require_user
 from app.auth_api import router as auth_router
 from app.config import get_settings
 from app.db.session import build_engine, build_sessionmaker
+from app.me_api import router as me_router
 from app.sandbox import DockerSandbox
 from app.schemas import ChatRequest, UploadResponse
 from app.uploads import (
@@ -141,6 +142,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(auth_router)
+app.include_router(me_router)
 
 
 @app.middleware("http")

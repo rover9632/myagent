@@ -1,5 +1,7 @@
 'use client';
 
+import Link from 'next/link';
+
 import type { Thread } from '@/lib/types';
 
 type Props = {
@@ -81,12 +83,21 @@ export default function Sidebar({
         <span className="truncate text-sm text-gray-600" title={username}>
           {username}
         </span>
-        <button
-          onClick={onLogout}
-          className="shrink-0 text-xs text-gray-400 transition hover:text-gray-700"
-        >
-          退出登录
-        </button>
+        <span className="flex shrink-0 items-center gap-3">
+          <Link
+            href="/profile"
+            className="text-xs text-gray-400 transition hover:text-gray-700"
+            title="个人中心"
+          >
+            个人中心
+          </Link>
+          <button
+            onClick={onLogout}
+            className="text-xs text-gray-400 transition hover:text-gray-700"
+          >
+            退出登录
+          </button>
+        </span>
       </div>
     </aside>
   );

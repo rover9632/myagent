@@ -5,8 +5,10 @@ import hashlib
 import re
 import secrets
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 import bcrypt
@@ -17,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.dbmodels.session import Session as SessionORM
 from app.dbmodels.user import User as UserORM
+from app.dbmodels.user_profile import UserProfile
 
 # Same grammar as app.schemas.USERNAME_PATTERN — keep the two in sync.
 USERNAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{3,31}$")
@@ -47,8 +50,46 @@ class User:
     username: str
 
 
+@dataclass(frozen=True, slots=True)
+class MeData:
+    """Everything the profile center shows — never carries password_hash/deleted_at.
+
+    ``user_profiles`` rows are lazily created on first PATCH (nothing creates them
+    at register), so when the row is absent ``get_me`` synthesizes the same column
+    defaults the ORM declares (zh-CN / Asia/Shanghai).
+    """
+
+    id: UUID
+    username: str
+    email: str | None
+    phone: str | None
+    status: str
+    email_verified_at: datetime | None
+    phone_verified_at: datetime | None
+    last_login_at: datetime | None
+    last_login_ip: str | None
+    created_at: datetime
+    display_name: str | None
+    avatar_url: str | None
+    bio: str | None
+    locale: str
+    timezone: str
+
+
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def ip_str(value: object) -> str | None:
+    """Normalize an INET-column read value to str|None (MeData's contract).
+
+    psycopg returns ``ipaddress.IPv4Address/IPv6Address`` objects for INET
+    columns — and a stored IPv4 often comes back in ``::ffff:``-mapped IPv6
+    form — while the response model expects a plain string. Normalizing at the
+    read edge keeps the dataclass honest instead of exploding in FastAPI
+    serialization (500).
+    """
+    return None if value is None else str(value)
 
 
 def hash_password(password: str, *, rounds: int = BCRYPT_ROUNDS) -> str:
@@ -237,6 +278,179 @@ class UserStore:
         stmt = delete(SessionORM).where(SessionORM.token_hash == token_hash(token))
         async with self.sessionmaker() as session, session.begin():
             await session.execute(stmt)
+
+    async def revoke_other_sessions(self, user_id: UUID, keep_token: str | None) -> int:
+        """Drop every session of the user except ``keep_token`` (the acting one).
+
+        Called after a successful password change so other devices get logged
+        out while the current tab survives. Returns the number of rows deleted.
+        """
+        stmt = delete(SessionORM).where(SessionORM.user_id == user_id)
+        if keep_token:
+            stmt = stmt.where(SessionORM.token_hash != token_hash(keep_token))
+        async with self.sessionmaker() as session, session.begin():
+            result = await session.execute(stmt)
+        return result.rowcount or 0
+
+    async def get_me(self, user_id: UUID) -> MeData | None:
+        """Read the profile-center view: users row + user_profiles row (or defaults).
+
+        Two plain reads, no write — a missing profile row is synthesized with the
+        ORM's column defaults. None when the users row vanished under a live token.
+        """
+        stmt = select(
+            UserORM.id,
+            UserORM.username,
+            UserORM.email,
+            UserORM.phone,
+            UserORM.status,
+            UserORM.email_verified_at,
+            UserORM.phone_verified_at,
+            UserORM.last_login_at,
+            UserORM.last_login_ip,
+            UserORM.created_at,
+        ).where(UserORM.id == user_id)
+        prof_stmt = select(
+            UserProfile.display_name,
+            UserProfile.avatar_url,
+            UserProfile.bio,
+            UserProfile.locale,
+            UserProfile.timezone,
+        ).where(UserProfile.user_id == user_id)
+        async with self.sessionmaker() as session:
+            row = (await session.execute(stmt)).first()
+            if row is None:
+                return None
+            prof = (await session.execute(prof_stmt)).first()
+        return MeData(
+            id=row.id,
+            username=row.username,
+            email=row.email,
+            phone=row.phone,
+            status=row.status,
+            email_verified_at=row.email_verified_at,
+            phone_verified_at=row.phone_verified_at,
+            last_login_at=row.last_login_at,
+            last_login_ip=ip_str(row.last_login_ip),
+            created_at=row.created_at,
+            display_name=prof.display_name if prof else None,
+            avatar_url=prof.avatar_url if prof else None,
+            bio=prof.bio if prof else None,
+            locale=prof.locale if prof else "zh-CN",
+            timezone=prof.timezone if prof else "Asia/Shanghai",
+        )
+
+    async def update_me(self, user_id: UUID, changes: Mapping[str, Any]) -> None:
+        """Apply a PATCH /v1/me in ONE transaction (contact half + profile half).
+
+        ``changes`` is ``model_dump(exclude_unset=True)``: key present == the
+        client intends to write it (None/"" already normalized to None by the
+        schema = clear), key absent == leave untouched. An empty mapping is a
+        complete no-op — it must not create a profile row or bump updated_at.
+
+        ``*_verified_at`` resets only when the canonical value actually differs,
+        because the web form resubmits every editable field on each save;
+        resetting unconditionally would wipe the 已验证 badge on a no-op save.
+        Values arrive pre-normalized (lowercase email, E.164 phone) from the
+        schema, so plain ``!=`` comparison is already canonical-aware.
+        """
+        if not changes:
+            return
+        profile_keys = ("display_name", "avatar_url", "bio", "locale", "timezone")
+        profile_changes = {k: changes[k] for k in profile_keys if k in changes}
+        try:
+            async with self.sessionmaker() as session, session.begin():
+                row = (
+                    await session.execute(
+                        select(
+                            UserORM.email,
+                            UserORM.phone,
+                            UserORM.email_verified_at,
+                            UserORM.phone_verified_at,
+                        ).where(UserORM.id == user_id)
+                    )
+                ).first()
+                if row is None:
+                    return  # user vanished; the endpoint's re-read surfaces the 404
+                values: dict[str, Any] = {}
+                if "email" in changes and changes["email"] != row.email:
+                    values["email"] = changes["email"]
+                    values["email_verified_at"] = None
+                if "phone" in changes and changes["phone"] != row.phone:
+                    values["phone"] = changes["phone"]
+                    values["phone_verified_at"] = None
+                for field, exc_cls in (("email", DuplicateEmail), ("phone", DuplicatePhone)):
+                    if field not in values or values[field] is None:
+                        continue
+                    # Friendly pre-check excluding own row (re-submitting one's own
+                    # email is a no-op above, but a case/E.164 rewrite could land
+                    # here); the unique constraints stay the race backstop below.
+                    clash = (
+                        await session.execute(
+                            select(UserORM.id).where(
+                                getattr(UserORM, field) == values[field], UserORM.id != user_id
+                            )
+                        )
+                    ).first()
+                    if clash is not None:
+                        raise exc_cls(str(user_id))
+                if values:
+                    await session.execute(
+                        update(UserORM).where(UserORM.id == user_id).values(**values)
+                    )
+                if profile_changes:
+                    prow = (
+                        await session.execute(
+                            select(UserProfile.user_id).where(UserProfile.user_id == user_id)
+                        )
+                    ).first()
+                    if prow is not None:
+                        await session.execute(
+                            update(UserProfile)
+                            .where(UserProfile.user_id == user_id)
+                            .values(**profile_changes)
+                        )
+                    else:
+                        # ORM insert so the Python-side defaults fire — attributes
+                        # is NOT NULL with no server default, locale/timezone too.
+                        session.add(UserProfile(user_id=user_id, **profile_changes))
+        except IntegrityError as exc:
+            constraint = getattr(exc.orig, "constraint_name", None) or ""
+            if constraint == "uq_users_email":
+                raise DuplicateEmail(str(user_id)) from exc
+            if constraint == "uq_users_phone":
+                raise DuplicatePhone(str(user_id)) from exc
+            raise
+
+    async def change_password(
+        self, user_id: UUID, current_password: str, new_password: str
+    ) -> bool:
+        """Verify the current password and re-hash the new one; False == rejected.
+
+        Mirrors ``authenticate``'s failure posture: a NULL hash (legacy row with
+        no password) burns dummy-checkpw time and fails like any wrong password,
+        and an over-72-byte ``current_password`` degrades to False inside
+        ``verify_password`` — never a 500. The caller must pre-reject an
+        over-long ``new_password`` at the schema edge (bcrypt 5 raises).
+        """
+        async with self.sessionmaker() as session:
+            row = (
+                await session.execute(select(UserORM.password_hash).where(UserORM.id == user_id))
+            ).first()
+        if row is None:
+            return False
+        if row.password_hash is None:
+            await self._burn_time(current_password)
+            return False
+        ok = await asyncio.to_thread(verify_password, current_password, row.password_hash)
+        if not ok:
+            return False
+        hashed = await asyncio.to_thread(hash_password, new_password, rounds=self.bcrypt_rounds)
+        async with self.sessionmaker() as session, session.begin():
+            await session.execute(
+                update(UserORM).where(UserORM.id == user_id).values(password_hash=hashed)
+            )
+        return True
 
     async def _purge_expired_throttled(self, interval_seconds: float = 300.0) -> None:
         now = time.monotonic()

@@ -15,8 +15,10 @@ from app.user_store import (
     DuplicateEmail,
     DuplicatePhone,
     DuplicateUsername,
+    MeData,
     User,
     classify_account,
+    ip_str,
 )
 
 
@@ -96,6 +98,10 @@ class FakeUserStore:
         self.phones: dict[str, UUID] = {}  # E.164 phone -> user id
         self.sessions: dict[str, tuple[UUID, datetime]] = {}  # token -> (user_id, expires_at)
         self.logins: dict[UUID, tuple[datetime, str | None]] = {}  # user_id -> (at, ip)
+        # Profile-center backing stores: per-user account row (display source)
+        # and user_profiles rows (absent key == no row, exactly like the DB).
+        self.accounts: dict[UUID, dict[str, Any]] = {}
+        self.profile_rows: dict[UUID, dict[str, Any]] = {}
         self.session_ttl_days = session_ttl_days
 
     async def create_user(
@@ -120,6 +126,15 @@ class FakeUserStore:
             self.emails[email] = uid
         if phone is not None:
             self.phones[phone] = uid
+        self.accounts[uid] = {
+            "email": email,
+            "phone": phone,
+            "email_verified_at": None,  # register never verifies anything
+            "phone_verified_at": None,
+            "status": "active",
+            "created_at": datetime.now(UTC),
+            "plain": password,
+        }
         return User(id=uid, username=username)
 
     async def authenticate(self, account: str, password: str) -> User | None:
@@ -173,6 +188,101 @@ class FakeUserStore:
 
     async def revoke_token(self, token: str) -> None:
         self.sessions.pop(token, None)
+
+    async def revoke_other_sessions(self, user_id: UUID, keep_token: str | None) -> int:
+        removed = 0
+        for token, (uid, _expires) in list(self.sessions.items()):
+            if uid == user_id and token != keep_token:
+                del self.sessions[token]
+                removed += 1
+        return removed
+
+    def _username_for(self, user_id: UUID) -> str | None:
+        for key, (uid, _pw) in self.users.items():
+            if uid == user_id:
+                return key
+        return None
+
+    async def get_me(self, user_id: UUID) -> MeData | None:
+        username = self._username_for(user_id)
+        acc = self.accounts.get(user_id)
+        if username is None or acc is None:
+            return None
+        prof = self.profile_rows.get(user_id)
+        login = self.logins.get(user_id)
+        return MeData(
+            id=user_id,
+            username=username,
+            email=acc["email"],
+            phone=acc["phone"],
+            status=acc["status"],
+            email_verified_at=acc["email_verified_at"],
+            phone_verified_at=acc["phone_verified_at"],
+            last_login_at=login[0] if login else None,
+            # Same read-edge normalization as the real store: tests can seed
+            # ipaddress objects (what psycopg actually returns for INET).
+            last_login_ip=ip_str(login[1]) if login else None,
+            created_at=acc["created_at"],
+            display_name=prof.get("display_name") if prof else None,
+            avatar_url=prof.get("avatar_url") if prof else None,
+            bio=prof.get("bio") if prof else None,
+            locale=prof.get("locale", "zh-CN") if prof else "zh-CN",
+            timezone=prof.get("timezone", "Asia/Shanghai") if prof else "Asia/Shanghai",
+        )
+
+    async def update_me(self, user_id: UUID, changes: dict) -> None:
+        # Mirrors UserStore.update_me semantics: key present == intended write,
+        # *_verified_at resets only on an actual value change, self-owned values
+        # never collide, and a collision aborts the WHOLE update (the real store
+        # does it in one transaction) — so conflicts are detected before any
+        # mutation happens.
+        if not changes:
+            return
+        acc = self.accounts.get(user_id)
+        if acc is None:
+            return
+        half_specs = (
+            ("email", "email_verified_at", self.emails, DuplicateEmail),
+            ("phone", "phone_verified_at", self.phones, DuplicatePhone),
+        )
+        plan = []
+        for field, verified_key, index, exc_cls in half_specs:
+            if field not in changes or changes[field] == acc[field]:
+                continue
+            new = changes[field]
+            if new is not None:
+                other = index.get(new)
+                if other is not None and other != user_id:
+                    raise exc_cls(str(user_id))
+            plan.append((field, verified_key, index, new))
+        for field, verified_key, index, new in plan:
+            old = acc[field]
+            if old is not None:
+                index.pop(old, None)
+            if new is not None:
+                index[new] = user_id
+            acc[field] = new
+            acc[verified_key] = None
+        profile_keys = ("display_name", "avatar_url", "bio", "locale", "timezone")
+        provided = {k: changes[k] for k in profile_keys if k in changes}
+        if provided:
+            # Lazy row creation with the same defaults the ORM declares.
+            row = self.profile_rows.setdefault(
+                user_id, {"locale": "zh-CN", "timezone": "Asia/Shanghai"}
+            )
+            row.update(provided)
+
+    async def change_password(
+        self, user_id: UUID, current_password: str, new_password: str
+    ) -> bool:
+        acc = self.accounts.get(user_id)
+        if acc is None or acc["plain"] != current_password:
+            return False
+        acc["plain"] = new_password
+        username = self._username_for(user_id)
+        if username is not None:
+            self.users[username] = (user_id, new_password)
+        return True
 
 
 @contextmanager
