@@ -15,10 +15,17 @@ export async function POST(req: NextRequest): Promise<Response> {
     return Response.json({ error: 'invalid json' }, { status: 400 });
   }
 
+  // Pass the client's forwarded-IP chain through so the backend can record
+  // last_login_ip against the real browser instead of this proxy's address.
+  const xff = req.headers.get('x-forwarded-for');
+
   try {
     const upstream = await fetch(`${base}/v1/auth/login`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(xff ? { 'x-forwarded-for': xff } : {}),
+      },
       body: JSON.stringify(body), // backend validates shape -> 401/422 relayed verbatim
       signal: req.signal,
     });

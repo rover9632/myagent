@@ -146,7 +146,7 @@ uv run python -m app.main
 curl http://127.0.0.1:8061/healthz
 ```
 
-注册一个用户并提取会话令牌，之后业务端点都带这个 Bearer 头：
+注册一个用户并提取会话令牌（`email`/`phone` 选填，手机号自动归一化为 E.164，默认 +86），之后业务端点都带这个 Bearer 头：
 
 ```bash
 TOKEN=$(curl -s http://127.0.0.1:8061/v1/auth/register \
@@ -159,7 +159,7 @@ curl -N http://127.0.0.1:8061/v1/agent/chat/stream \
   -d '{"message":"你好"}'
 ```
 
-已注册过的用户改用 `/v1/auth/login`（每次登录都会签发新令牌）；`/v1/auth/me` 查看当前身份，`/v1/auth/logout` 服务端吊销令牌。
+已注册过的用户改用 `/v1/auth/login`，请求体的 `account` 可填用户名、注册邮箱或手机号（每次登录都会签发新令牌）；`/v1/auth/me` 查看当前身份，`/v1/auth/logout` 服务端吊销令牌。用户名规则：以英文字母开头、4-32 位。
 
 ## 7. Web 前端（`web/`）
 

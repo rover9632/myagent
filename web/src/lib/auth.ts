@@ -51,15 +51,14 @@ export type AuthResult =
 
 async function postAuth(
   path: '/api/auth/login' | '/api/auth/register',
-  username: string,
-  password: string,
+  body: Record<string, string>,
 ): Promise<AuthResult> {
   let res: Response;
   try {
     res = await fetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify(body),
     });
   } catch {
     return { ok: false, status: 0, error: 'network' };
@@ -84,12 +83,24 @@ async function postAuth(
   }
 }
 
-export function login(username: string, password: string): Promise<AuthResult> {
-  return postAuth('/api/auth/login', username, password);
+// Login accepts one account string: username, email, or phone (backend decides).
+export function login(account: string, password: string): Promise<AuthResult> {
+  return postAuth('/api/auth/login', { account, password });
 }
 
-export function register(username: string, password: string): Promise<AuthResult> {
-  return postAuth('/api/auth/register', username, password);
+export type RegisterPayload = {
+  username: string;
+  password: string;
+  email?: string;
+  phone?: string;
+};
+
+export function register(payload: RegisterPayload): Promise<AuthResult> {
+  const body: Record<string, string> = { username: payload.username, password: payload.password };
+  // Empty optional fields are omitted entirely so the backend sees "absent".
+  if (payload.email) body.email = payload.email;
+  if (payload.phone) body.phone = payload.phone;
+  return postAuth('/api/auth/register', body);
 }
 
 // Fire-and-forget server-side revoke; local state is cleared regardless.

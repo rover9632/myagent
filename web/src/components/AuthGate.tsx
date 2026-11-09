@@ -4,9 +4,13 @@ import { useState, type FormEvent } from 'react';
 
 import { login, register, type Auth } from '@/lib/auth';
 
-// Mirror of the backend's USERNAME_RE — instant feedback, backend stays
+// Mirrors of the backend rules — instant feedback only; the backend stays
 // authoritative (its 422 detail is surfaced verbatim below).
-const USERNAME_RE = /^[a-zA-Z0-9_-]{3,32}$/;
+const USERNAME_RE = /^[a-zA-Z][a-zA-Z0-9_-]{3,31}$/;
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+// Loose on purpose: the backend normalizes to E.164 (default region +86) and
+// is the real validator.
+const PHONE_RE = /^\+?[0-9\s-]{6,20}$/;
 
 type Props = { onAuthed: (a: Auth) => void };
 
@@ -14,7 +18,11 @@ type Props = { onAuthed: (a: Auth) => void };
 function mapError(status: number, raw: string, isLogin: boolean): string {
   if (status === 0) return '后端不可达，请确认服务已启动';
   if (isLogin && status === 401) return '用户名或密码错误';
-  if (status === 409) return '用户名已被注册';
+  if (status === 409) {
+    if (raw.includes('email already exists')) return '该邮箱已被注册';
+    if (raw.includes('phone already exists')) return '该手机号已被注册';
+    return '用户名已被注册';
+  }
   try {
     const detail = (JSON.parse(raw) as { detail?: unknown }).detail;
     if (typeof detail === 'string' && detail) return detail;
@@ -31,30 +39,64 @@ function mapError(status: number, raw: string, isLogin: boolean): string {
 
 export default function AuthGate({ onAuthed }: Props) {
   const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [account, setAccount] = useState(''); // login: username / email / phone
   const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError('');
-    if (!USERNAME_RE.test(username)) {
-      setError('用户名需为 3-32 位字母、数字、下划线或连字符');
-      return;
-    }
-    if (mode === 'register' && password.length < 8) {
-      setError('密码至少 8 位');
-      return;
-    }
-    if (!password) {
-      setError('请输入密码');
-      return;
+    const emailTrim = email.trim();
+    const phoneTrim = phone.trim();
+    if (mode === 'login') {
+      // One account box for username/email/phone — no username regex here;
+      // anything that doesn't match a user is a plain 401.
+      if (!account.trim()) {
+        setError('请输入用户名、邮箱或手机号');
+        return;
+      }
+      if (!password) {
+        setError('请输入密码');
+        return;
+      }
+    } else {
+      if (!USERNAME_RE.test(username)) {
+        setError('用户名需为 4-32 位，以英文字母开头，可含数字、_ 或 -');
+        return;
+      }
+      if (emailTrim && !EMAIL_RE.test(emailTrim)) {
+        setError('邮箱格式不正确');
+        return;
+      }
+      if (phoneTrim && !PHONE_RE.test(phoneTrim)) {
+        setError('手机号格式不正确');
+        return;
+      }
+      if (password.length < 8) {
+        setError('密码至少 8 位');
+        return;
+      }
+      if (confirm !== password) {
+        setError('两次输入的密码不一致');
+        return;
+      }
     }
     setBusy(true);
     try {
       const res =
-        mode === 'login' ? await login(username, password) : await register(username, password);
+        mode === 'login'
+          ? await login(account.trim(), password)
+          : await register({
+              username,
+              password,
+              email: emailTrim || undefined,
+              phone: phoneTrim || undefined,
+            });
       if (res.ok) {
         onAuthed(res.auth);
       } else {
@@ -76,17 +118,55 @@ export default function AuthGate({ onAuthed }: Props) {
           {mode === 'login' ? '登录以继续' : '创建新账号'}
         </p>
         <form onSubmit={submit} className="space-y-4">
-          <label className="block text-sm">
-            <span className="mb-1 block text-gray-600">用户名</span>
-            <input
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              autoComplete="username"
-              autoFocus
-              className={inputClass}
-              placeholder="3-32 位字母、数字、_ 或 -"
-            />
-          </label>
+          {mode === 'login' ? (
+            <label className="block text-sm">
+              <span className="mb-1 block text-gray-600">账号</span>
+              <input
+                value={account}
+                onChange={(e) => setAccount(e.target.value)}
+                autoComplete="username"
+                autoFocus
+                className={inputClass}
+                placeholder="用户名 / 邮箱 / 手机号"
+              />
+            </label>
+          ) : (
+            <>
+              <label className="block text-sm">
+                <span className="mb-1 block text-gray-600">用户名</span>
+                <input
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  autoComplete="username"
+                  autoFocus
+                  className={inputClass}
+                  placeholder="4-32 位，以英文字母开头"
+                />
+              </label>
+              <label className="block text-sm">
+                <span className="mb-1 block text-gray-600">邮箱（选填）</span>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  autoComplete="email"
+                  className={inputClass}
+                  placeholder="用于登录，可选"
+                />
+              </label>
+              <label className="block text-sm">
+                <span className="mb-1 block text-gray-600">手机号（选填）</span>
+                <input
+                  type="tel"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  autoComplete="tel"
+                  className={inputClass}
+                  placeholder="默认中国大陆 +86"
+                />
+              </label>
+            </>
+          )}
           <label className="block text-sm">
             <span className="mb-1 block text-gray-600">密码</span>
             <input
@@ -98,6 +178,19 @@ export default function AuthGate({ onAuthed }: Props) {
               placeholder={mode === 'register' ? '至少 8 位' : '请输入密码'}
             />
           </label>
+          {mode === 'register' && (
+            <label className="block text-sm">
+              <span className="mb-1 block text-gray-600">确认密码</span>
+              <input
+                type="password"
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+                autoComplete="new-password"
+                className={inputClass}
+                placeholder="再次输入密码"
+              />
+            </label>
+          )}
           {error && <p className="text-sm text-red-600">{error}</p>}
           <button
             type="submit"

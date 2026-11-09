@@ -11,7 +11,13 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.auth import require_user
-from app.user_store import DuplicateUsername, User
+from app.user_store import (
+    DuplicateEmail,
+    DuplicatePhone,
+    DuplicateUsername,
+    User,
+    classify_account,
+)
 
 
 class FakeAgent:
@@ -80,29 +86,71 @@ class FakeUserStore:
 
     Plaintext passwords on purpose: bcrypt correctness is covered by
     test_auth_units.py, SQL by the real-backend smoke. Method signatures and
-    semantics (case-insensitive names, fresh token per session, expiry) match
-    the real store.
+    semantics (case-insensitive names, email/phone identifier forms, fresh
+    token per session, expiry) match the real store.
     """
 
     def __init__(self, session_ttl_days: int = 30) -> None:
         self.users: dict[str, tuple[UUID, str]] = {}  # username -> (id, password)
+        self.emails: dict[str, UUID] = {}  # lowercased email -> user id
+        self.phones: dict[str, UUID] = {}  # E.164 phone -> user id
         self.sessions: dict[str, tuple[UUID, datetime]] = {}  # token -> (user_id, expires_at)
+        self.logins: dict[UUID, tuple[datetime, str | None]] = {}  # user_id -> (at, ip)
         self.session_ttl_days = session_ttl_days
 
-    async def create_user(self, username: str, password: str) -> User:
+    async def create_user(
+        self,
+        username: str,
+        password: str,
+        *,
+        email: str | None = None,
+        phone: str | None = None,
+    ) -> User:
+        # email/phone arrive already normalized (lowercase / E.164) — the
+        # RegisterRequest validators are shared with the real store.
         if username.lower() in {u.lower() for u in self.users}:
             raise DuplicateUsername(username)
+        if email is not None and email in self.emails:
+            raise DuplicateEmail(username)
+        if phone is not None and phone in self.phones:
+            raise DuplicatePhone(username)
         uid = uuid4()
         self.users[username] = (uid, password)
+        if email is not None:
+            self.emails[email] = uid
+        if phone is not None:
+            self.phones[phone] = uid
         return User(id=uid, username=username)
 
-    async def authenticate(self, username: str, password: str) -> User | None:
-        # Mirrors the real store's lower(username) lookup: case-insensitive
-        # match, canonical username returned.
-        for name, (uid, pw) in self.users.items():
-            if name.lower() == username.lower():
-                return User(id=uid, username=name) if pw == password else None
-        return None
+    async def authenticate(self, account: str, password: str) -> User | None:
+        # Mirrors the real store: classify, then username > email > phone
+        # priority; username match stays case-insensitive, canonical name back.
+        username_part, email_part, phone_part = classify_account(account)
+        user_id: UUID | None = None
+        name: str | None = None
+        pw: str | None = None
+        for key, (uid, plain) in self.users.items():
+            if key.lower() == username_part.lower():
+                name, user_id, pw = key, uid, plain
+                break
+        if user_id is None and email_part is not None:
+            user_id = self.emails.get(email_part)
+        if user_id is None and phone_part is not None:
+            user_id = self.phones.get(phone_part)
+        if user_id is None:
+            return None
+        if name is None or pw is None:  # matched by email/phone: recover the canonical username
+            for key, (uid, plain) in self.users.items():
+                if uid == user_id:
+                    name, pw = key, plain
+                    break
+        if name is None or pw is None:
+            return None
+        return User(id=user_id, username=name) if pw == password else None
+
+    async def touch_login(self, user_id: UUID, ip: str | None) -> None:
+        # Mirrors UserStore.touch_login: last_login_at + last_login_ip audit row.
+        self.logins[user_id] = (datetime.now(UTC), ip)
 
     async def create_session(self, user_id: UUID) -> tuple[str, datetime]:
         token = secrets.token_urlsafe(32)  # real generator: exercises the same flow

@@ -10,19 +10,30 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import bcrypt
-from sqlalchemy import delete, func, select
+import phonenumbers
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.dbmodels.session import Session as SessionORM
 from app.dbmodels.user import User as UserORM
 
-USERNAME_RE = re.compile(r"^[a-zA-Z0-9_-]{3,32}$")
+# Same grammar as app.schemas.USERNAME_PATTERN — keep the two in sync.
+USERNAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{3,31}$")
 MAX_PASSWORD_BYTES = 72
 BCRYPT_ROUNDS = 12
+DEFAULT_PHONE_REGION = "CN"
 
 
 class DuplicateUsername(Exception):
+    pass
+
+
+class DuplicateEmail(Exception):
+    pass
+
+
+class DuplicatePhone(Exception):
     pass
 
 
@@ -57,6 +68,38 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False  # corrupt stored hash -> treat as auth failure, never 500
 
 
+def normalize_phone(raw: str) -> str:
+    """Return the E.164 form or raise ValueError. Bare/national numbers default
+    to mainland China (+86); international numbers need an explicit +country."""
+    try:
+        parsed = phonenumbers.parse(raw.strip(), DEFAULT_PHONE_REGION)
+    except phonenumbers.NumberParseException as exc:
+        raise ValueError("phone is not a valid number") from exc
+    if not phonenumbers.is_valid_number(parsed):
+        raise ValueError("phone is not a valid number")
+    return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+
+
+def classify_account(account: str) -> tuple[str, str | None, str | None]:
+    """Split a login account string into (username_candidate, email, e164_phone).
+
+    Detection: '@' wins as email; a '+'-prefixed or digit-only/separator string
+    is attempted as a phone. Never raises — a malformed phone just falls back to
+    the username branch (login failures are 401, never 422/500). Shared by the
+    real store and tests/conftest FakeUserStore.
+    """
+    acct = account.strip()
+    if "@" in acct:
+        return acct, acct.lower(), None
+    compact = re.sub(r"[()\-. ]", "", acct)
+    if compact.startswith("+") or compact.isdigit():
+        try:
+            return acct, None, normalize_phone(compact)
+        except ValueError:
+            pass
+    return acct, None, None
+
+
 class UserStore:
     """Thin data-access layer over the SQLAlchemy ORM (app/dbmodels).
 
@@ -69,7 +112,10 @@ class UserStore:
 
     Case-insensitive username handling (anti-impersonation) mirrors the old
     store: lookups use ``lower(username)`` and the DB enforces uniqueness via
-    the functional unique index on ``lower(users.username)``.
+    the functional unique index on ``lower(users.username)``. Email/phone are
+    optional registrations; emails are stored lowercase (uniqueness collapses
+    write-side) and phones canonicalized to E.164, and ``authenticate`` accepts
+    any of the three identifier forms via :func:`classify_account`.
     """
 
     def __init__(
@@ -85,21 +131,64 @@ class UserStore:
         self._last_purge = 0.0
         self._dummy_hash: str | None = None
 
-    async def create_user(self, username: str, password: str) -> User:
+    async def create_user(
+        self,
+        username: str,
+        password: str,
+        *,
+        email: str | None = None,
+        phone: str | None = None,
+    ) -> User:
+        # Friendly-error pre-check; the unique constraints below remain the
+        # authoritative race backstop.
+        conds = [func.lower(UserORM.username) == func.lower(username)]
+        if email is not None:
+            conds.append(UserORM.email == email)
+        if phone is not None:
+            conds.append(UserORM.phone == phone)
+        async with self.sessionmaker() as session:
+            stmt = select(UserORM.username, UserORM.email, UserORM.phone).where(or_(*conds))
+            existing = (await session.execute(stmt)).first()
+        if existing is not None:
+            # Priority mirrors the login tie-break: username > email > phone.
+            if existing.username is not None and existing.username.lower() == username.lower():
+                raise DuplicateUsername(username)
+            if email is not None and existing.email == email:
+                raise DuplicateEmail(username)
+            if phone is not None and existing.phone == phone:
+                raise DuplicatePhone(username)
         hashed = await asyncio.to_thread(hash_password, password, rounds=self.bcrypt_rounds)
-        user = UserORM(username=username, password_hash=hashed)
+        user = UserORM(username=username, password_hash=hashed, email=email, phone=phone)
         try:
             async with self.sessionmaker() as session, session.begin():
                 session.add(user)
                 await session.flush()  # populates user.id (python-side uuid4 default)
         except IntegrityError as exc:
-            # uq_users_username or the functional lower(username) unique index.
+            constraint = getattr(exc.orig, "constraint_name", None) or ""
+            if constraint == "uq_users_email":
+                raise DuplicateEmail(username) from exc
+            if constraint == "uq_users_phone":
+                raise DuplicatePhone(username) from exc
+            # uq_users_username, the functional lower(username) unique index,
+            # or an unknown constraint: only username is always non-NULL.
             raise DuplicateUsername(username) from exc
         return User(id=user.id, username=user.username)
 
-    async def authenticate(self, username: str, password: str) -> User | None:
-        stmt = select(UserORM.id, UserORM.username, UserORM.password_hash).where(
-            func.lower(UserORM.username) == func.lower(username)
+    async def authenticate(self, account: str, password: str) -> User | None:
+        username_part, email_part, phone_part = classify_account(account)
+        username_cond = func.lower(UserORM.username) == func.lower(username_part)
+        conds = [username_cond]
+        if email_part is not None:
+            conds.append(UserORM.email == email_part)  # stored lowercase at write time
+        if phone_part is not None:
+            conds.append(UserORM.phone == phone_part)  # canonical E.164
+        # Deterministic tie-break when one string matches two identities
+        # (e.g. a legacy digit username that is also someone's phone): username wins.
+        stmt = (
+            select(UserORM.id, UserORM.username, UserORM.password_hash)
+            .where(or_(*conds))
+            .order_by(case((username_cond, 0), else_=1), UserORM.id)
+            .limit(1)
         )
         async with self.sessionmaker() as session:
             row = (await session.execute(stmt)).first()
@@ -108,6 +197,21 @@ class UserStore:
             return None
         ok = await asyncio.to_thread(verify_password, password, row.password_hash)
         return User(id=row.id, username=row.username) if ok else None
+
+    async def touch_login(self, user_id: UUID, ip: str | None) -> None:
+        """Record a successful login (timestamp + client IP) on the user row.
+
+        ``ip`` must already be validated/normalized by the caller — the INET
+        column rejects garbage and a failed write must never mask a good login,
+        so auth_api only ever passes None or a parseable address.
+        """
+        stmt = (
+            update(UserORM)
+            .where(UserORM.id == user_id)
+            .values(last_login_at=func.now(), last_login_ip=ip)
+        )
+        async with self.sessionmaker() as session, session.begin():
+            await session.execute(stmt)
 
     async def create_session(self, user_id: UUID) -> tuple[str, datetime]:
         token = secrets.token_urlsafe(32)  # 256 bits of entropy, 43 chars

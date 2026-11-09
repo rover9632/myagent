@@ -1,7 +1,12 @@
 from datetime import datetime
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+
+from app.user_store import normalize_phone
+
+# Same grammar as app.user_store.USERNAME_RE — keep the two in sync.
+USERNAME_PATTERN = r"^[a-zA-Z][a-zA-Z0-9_-]{3,31}$"
 
 
 class AttachmentRef(BaseModel):
@@ -41,8 +46,34 @@ class SSEEvent(BaseModel):
 
 class RegisterRequest(BaseModel):
     # Same grammar as app.user_store.USERNAME_RE — directory-safe by construction.
-    username: str = Field(pattern=r"^[a-zA-Z0-9_-]{3,32}$")
+    username: str = Field(pattern=USERNAME_PATTERN)
     password: str = Field(min_length=8, max_length=72)
+    email: EmailStr | None = None
+    phone: str | None = Field(default=None, max_length=32)
+
+    @field_validator("email", "phone", mode="before")
+    @classmethod
+    def _blank_optional_to_none(cls, v: object) -> object:
+        # "optional" means an untouched HTML field ("") is absent, not invalid.
+        # mode="before" is load-bearing: "" would fail EmailStr core validation
+        # before any mode="after" hook could see it.
+        if isinstance(v, str):
+            v = v.strip()
+            return v if v else None
+        return v
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def _lowercase_email(cls, v: str | None) -> str | None:
+        # Case-insensitive uniqueness is enforced write-side: all rows are
+        # stored lowercase, so uq_users_email collapses Bob@X / bob@x.
+        return v.lower() if v is not None else None
+
+    @field_validator("phone", mode="after")
+    @classmethod
+    def _normalize_phone(cls, v: str | None) -> str | None:
+        # E.164 with mainland China (+86) as the default region; ValueError → 422.
+        return normalize_phone(v) if v is not None else None
 
     @model_validator(mode="after")
     def _password_within_bcrypt_limit(self) -> Self:
@@ -56,7 +87,10 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     # Lenient caps: login input is only compared, never stored. Over-72-byte
     # passwords simply fail authentication (401), never a validation error.
-    username: str = Field(min_length=1, max_length=64)
+    # account may be a username, email, or phone; classification/normalization
+    # happens in UserStore.classify_account — never here, so a malformed
+    # phone/email can only 401, never 422.
+    account: str = Field(min_length=1, max_length=320)
     password: str = Field(min_length=1, max_length=200)
 
 
