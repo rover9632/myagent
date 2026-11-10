@@ -57,6 +57,7 @@ class AgentService:
         thread_id: str,
         message: str,
         attachment_note: str | None = None,
+        images: list[dict] | None = None,
     ) -> AsyncIterator[SSEEvent]:
         user_token = set_username(username)
         thread_token = set_thread_id(thread_id)
@@ -80,13 +81,23 @@ class AgentService:
             # appended only for turns that actually echo attachments.
             content = message if not attachment_note else f"{message}\n\n{attachment_note}"
 
+            # This turn's inline images (base64 data URLs from app.uploads)
+            # become multimodal blocks; text-only turns keep plain-string
+            # content so history/tooling stays exactly as before.
+            prompt: str | list[dict[str, Any]] = content
+            if images:
+                image_blocks = [
+                    {"type": "image_url", "image_url": {"url": img["data_url"]}} for img in images
+                ]
+                prompt = [{"type": "text", "text": content}, *image_blocks]
+
             try:
                 async for event in self.agent.astream_events(
                     {
                         "messages": [
                             {
                                 "role": "user",
-                                "content": content,
+                                "content": prompt,
                             }
                         ]
                     },

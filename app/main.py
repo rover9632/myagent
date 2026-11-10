@@ -24,6 +24,8 @@ from app.schemas import ChatRequest, UploadResponse
 from app.uploads import (
     UploadRejected,
     build_attachment_note,
+    build_image_note,
+    collect_inline_images,
     list_uploads,
     parse_allowed_extensions,
     save_upload,
@@ -217,16 +219,24 @@ async def chat_stream(request: ChatRequest, user: Annotated[User, Depends(requir
     # Attachment manifest is injected only when the client echoes attachments;
     # the directory scan then validates/augments them (see app.uploads).
     note = None
+    images: list[dict] = []
     sandbox = getattr(app.state, "sandbox", None)
     if request.attachments and sandbox is not None:
         workspace = sandbox.workspace_for(user.username, thread_id)
         note = await asyncio.to_thread(build_attachment_note, workspace, request.attachments)
+        # Vision: the first few echoed image files go to the model inline as
+        # multimodal content; the note stops it from re-reading them via tools.
+        images = await asyncio.to_thread(collect_inline_images, workspace, request.attachments)
+        if images:
+            image_note = build_image_note(images)
+            note = f"{note}\n\n{image_note}" if note else image_note
 
     async for event in service.stream(
         username=user.username,
         thread_id=thread_id,
         message=request.message,
         attachment_note=note,
+        images=images,
     ):
         yield ServerSentEvent(data=event.data, event=event.type)
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 
 import httpx
@@ -13,7 +14,9 @@ from app.schemas import AttachmentRef
 from app.uploads import (
     UploadRejected,
     build_attachment_note,
+    build_image_note,
     check_extension,
+    collect_inline_images,
     list_uploads,
     parse_allowed_extensions,
     sanitize_filename,
@@ -211,9 +214,9 @@ def test_note_marks_fresh_and_never_uses_echoed_name(tmp_path):
 
     note = build_attachment_note(tmp_path, [_ref("uploads/a.txt", name="<script>evil")])
     assert note is not None
-    assert note.startswith("[系统注入 · 附件清单]")
-    assert "- /workspace/uploads/a.txt（5 B，本轮新上传）" in note
-    assert "- /workspace/uploads/b.txt（2 B）" in note
+    assert note.startswith("[system-injected · attachment manifest]")
+    assert "- /workspace/uploads/a.txt (5 B, uploaded this turn)" in note
+    assert "- /workspace/uploads/b.txt (2 B)" in note
     assert "evil" not in note and "<script>" not in note  # echoed names never reach prompt
     assert note.count("uploads/a.txt") == 1  # deduped against the scan
 
@@ -226,8 +229,8 @@ def test_note_drops_invalid_echo_but_keeps_scan(tmp_path):
     note = build_attachment_note(tmp_path, [_ref("../../etc/passwd")])
     assert note is not None
     assert "/etc/passwd" not in note
-    assert "- /workspace/uploads/a.txt（1 B）" in note  # scan augmented, not fresh
-    assert "本轮新上传" not in note
+    assert "- /workspace/uploads/a.txt (1 B)" in note  # scan augmented, not fresh
+    assert "uploaded this turn" not in note
 
 
 def test_note_overflow_line(tmp_path):
@@ -238,8 +241,67 @@ def test_note_overflow_line(tmp_path):
 
     note = build_attachment_note(tmp_path, [_ref("uploads/doc00.txt")])
     assert note is not None
-    assert "另有 5 个文件未列出" in note
+    assert "5 more files not listed" in note
     assert f"ls {up.CONTAINER_UPLOADS}" in note
+
+
+# ---------------------------------------------------------------------------
+# units: collect_inline_images / build_image_note
+# ---------------------------------------------------------------------------
+
+
+def _seed_uploads(tmp_path, files: dict[str, bytes]):
+    directory = up.uploads_dir(tmp_path)
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, data in files.items():
+        (directory / name).write_bytes(data)
+
+
+def test_collect_images_first_three_in_echo_order(tmp_path):
+    _seed_uploads(
+        tmp_path,
+        {"notes.txt": b"T", "a.png": b"AA", "b.jpg": b"BB", "c.gif": b"CC", "d.webp": b"DD"},
+    )
+    refs = [_ref(f"uploads/{n}") for n in ("notes.txt", "a.png", "b.jpg", "c.gif", "d.webp")]
+
+    out = collect_inline_images(tmp_path, refs)
+    # txt filtered out, the 4th image is over the cap; order follows the echo
+    assert [i["name"] for i in out] == ["a.png", "b.jpg", "c.gif"]
+    assert out[0]["data_url"] == "data:image/png;base64," + base64.b64encode(b"AA").decode()
+    assert out[1]["data_url"].startswith("data:image/jpeg;base64,")
+    assert out[2]["data_url"].startswith("data:image/gif;base64,")
+
+
+def test_collect_images_skips_invalid_empty_oversize_and_duplicates(tmp_path, monkeypatch):
+    monkeypatch.setattr(up, "MAX_INLINE_IMAGE_BYTES", 4)
+    _seed_uploads(tmp_path, {"empty.png": b"", "big.png": b"x" * 5, "ok.png": b"12"})
+    refs = [
+        _ref("uploads/empty.png"),
+        _ref("uploads/big.png"),
+        _ref("uploads/missing.png"),
+        _ref("../../etc/passwd"),
+        _ref("uploads/ok.png"),
+        _ref("uploads/ok.png"),  # duplicate echo
+    ]
+
+    out = collect_inline_images(tmp_path, refs)
+    assert [i["name"] for i in out] == ["ok.png"]
+
+
+def test_collect_images_empty_workspace_or_refs(tmp_path):
+    assert collect_inline_images(tmp_path, []) == []
+    assert collect_inline_images(tmp_path / "nonexistent", [_ref("uploads/a.png")]) == []
+
+
+def test_image_note_uses_inline_count_and_names():
+    images = [
+        {"name": "a.png", "data_url": "data:image/png;base64,AAA="},
+        {"name": "b.webp", "data_url": "data:image/webp;base64,BBB="},
+    ]
+    note = build_image_note(images)
+    assert note.startswith("[system-injected · inline images]")
+    assert "2 uploaded image(s) (a.png, b.webp)" in note
+    assert "only when the task genuinely needs it" in note  # steers, never forbids tool reads
 
 
 # ---------------------------------------------------------------------------
@@ -403,8 +465,56 @@ async def test_chat_stream_injects_manifest(client, fake_events):
     )
     assert resp.status_code == 200
     content = _sent_content(agent)
-    assert content.startswith("总结\n\n[系统注入 · 附件清单]")
-    assert "/workspace/uploads/notes.txt（4 B，本轮新上传）" in content
+    assert content.startswith("总结\n\n[system-injected · attachment manifest]")
+    assert "/workspace/uploads/notes.txt (4 B, uploaded this turn)" in content
+
+
+async def test_chat_stream_attaches_first_three_images_as_blocks(client, fake_events):
+    agent = _wire_agent(fake_events)
+    for i, name in enumerate(("a.png", "b.png", "c.png", "d.png")):
+        resp = await _post_file(client, name=name, content=f"img{i}".encode())
+        assert resp.status_code == 200
+
+    resp = await client.post(
+        CHAT_ENDPOINT,
+        json={
+            "message": "看看这几张图",
+            "thread_id": "t-up",
+            "attachments": [
+                {"name": n, "path": f"uploads/{n}"} for n in ("a.png", "b.png", "c.png", "d.png")
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    assert agent.received_payload is not None
+    content = agent.received_payload["messages"][0]["content"]
+    assert isinstance(content, list)
+    text_block, *image_blocks = content
+    assert text_block["type"] == "text"
+    assert text_block["text"].startswith("看看这几张图\n\n[system-injected · attachment manifest]")
+    assert "[system-injected · inline images]" in text_block["text"]
+    assert "(a.png, b.png, c.png)" in text_block["text"]  # d.png over the cap, not claimed inline
+    # Only the first MAX_INLINE_IMAGES echoes become multimodal blocks.
+    assert len(image_blocks) == up.MAX_INLINE_IMAGES
+    urls = [b["image_url"]["url"] for b in image_blocks]
+    assert all(u.startswith("data:image/png;base64,") for u in urls)
+    assert urls[0].endswith(base64.b64encode(b"img0").decode())
+
+
+async def test_chat_stream_text_only_attachment_stays_plain_string(client, fake_events):
+    agent = _wire_agent(fake_events)
+    await _post_file(client, name="notes.txt", content=b"data")
+
+    resp = await client.post(
+        CHAT_ENDPOINT,
+        json={
+            "message": "总结",
+            "thread_id": "t-up",
+            "attachments": [{"name": "notes.txt", "path": "uploads/notes.txt"}],
+        },
+    )
+    assert resp.status_code == 200
+    assert isinstance(_sent_content(agent), str)  # no images -> old plain-content shape
 
 
 async def test_chat_stream_drops_invalid_echo_paths(client, fake_events):

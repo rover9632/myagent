@@ -44,13 +44,52 @@ async def test_stream_appends_attachment_note_after_message(fake_events):
             username="alice",
             thread_id="t1",
             message="总结这个文件",
-            attachment_note="[系统注入 · 附件清单]\n- x",
+            attachment_note="[system-injected · attachment manifest]\n- x",
         )
     ]
 
     content = agent.received_payload["messages"][0]["content"]
     assert content.startswith("总结这个文件\n\n")
-    assert content.endswith("[系统注入 · 附件清单]\n- x")
+    assert content.endswith("[system-injected · attachment manifest]\n- x")
+
+
+async def test_stream_builds_multimodal_blocks_for_images(fake_events):
+    agent = FakeAgent(fake_events)
+    service = AgentService(agent)
+    images = [
+        {"name": "a.png", "data_url": "data:image/png;base64,AAA="},
+        {"name": "b.png", "data_url": "data:image/png;base64,BBB="},
+    ]
+    _ = [
+        event
+        async for event in service.stream(
+            username="alice",
+            thread_id="t1",
+            message="看图",
+            attachment_note="NOTE",
+            images=images,
+        )
+    ]
+
+    assert agent.received_payload is not None
+    content = agent.received_payload["messages"][0]["content"]
+    assert content[0] == {"type": "text", "text": "看图\n\nNOTE"}
+    assert content[1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA="}}
+    assert content[2] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBB="}}
+
+
+async def test_stream_empty_images_list_keeps_plain_content(fake_events):
+    agent = FakeAgent(fake_events)
+    service = AgentService(agent)
+    _ = [
+        event
+        async for event in service.stream(
+            username="alice", thread_id="t1", message="hi", images=[]
+        )
+    ]
+
+    assert agent.received_payload is not None
+    assert agent.received_payload["messages"][0]["content"] == "hi"
 
 
 async def test_stream_without_note_sends_message_verbatim(fake_events):
