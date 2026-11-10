@@ -348,9 +348,10 @@ class UserStore:
         schema = clear), key absent == leave untouched. An empty mapping is a
         complete no-op — it must not create a profile row or bump updated_at.
 
-        ``*_verified_at`` resets only when the canonical value actually differs,
-        because the web form resubmits every editable field on each save;
-        resetting unconditionally would wipe the 已验证 badge on a no-op save.
+        ``*_verified_at`` resets only when the canonical value actually
+        differs, so a same-value resubmit (the web UI now PATCHes one field
+        at a time, but this stays true for any client) never wipes the 已验证
+        badge.
         Values arrive pre-normalized (lowercase email, E.164 phone) from the
         schema, so plain ``!=`` comparison is already canonical-aware.
         """

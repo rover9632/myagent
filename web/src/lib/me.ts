@@ -71,9 +71,10 @@ export function getMe(token: string): Promise<MeResult> {
   return getMeData(token);
 }
 
-// The form resubmits every editable field on each save; the backend's
-// change-detection makes unchanged email/phone a no-op for *_verified_at,
-// so the client must NOT try to be clever with diffs.
+// PATCH is exclude_unset on the backend: only the keys you send are written.
+// The profile UI edits one field at a time and sends just that key; unchanged
+// email/phone would also be a no-op for *_verified_at thanks to the store's
+// change-detection, but relying on that is unnecessary now.
 export async function patchMe(token: string, changes: MePatch): Promise<MeResult> {
   let res: Response;
   try {

@@ -128,8 +128,9 @@ class MePatchRequest(BaseModel):
     The endpoint uses ``model_dump(exclude_unset=True)`` — absent means
     untouched, explicit null/"" means clear (for the nullable ones). Length
     ceilings mirror the DB columns so oversized strings 422 here instead of
-    500 at the DB. The web form resubmits every editable field on each save;
-    UserStore.update_me's change-detection makes that safe for *_verified_at.
+    500 at the DB. The web UI PATCHes one field at a time; update_me's
+    change-detection additionally makes a same-value resubmit safe for
+    *_verified_at.
     """
 
     email: EmailStr | None = None

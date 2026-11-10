@@ -1,12 +1,12 @@
 'use client';
 
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import type { Auth } from '@/lib/auth';
-import { changePassword, patchMe, type MeProfile } from '@/lib/me';
+import { changePassword, patchMe, type MePatch, type MeProfile } from '@/lib/me';
 
 // Mirrors of the backend rules — instant feedback only; the backend stays
-// authoritative (its 422/409/403 detail is surfaced below).
+// authoritative (its 422/409/403 detail is surfaced inside the edit modal).
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const PHONE_RE = /^\+?[0-9\s-]{6,20}$/;
 
@@ -37,6 +37,19 @@ type Props = {
   profile: MeProfile;
   onUnauthorized: () => void;
 };
+
+// 每个可修改字段对应一个编辑弹框；一次只 PATCH 一个字段。
+type EditKey =
+  | 'email'
+  | 'phone'
+  | 'display_name'
+  | 'avatar_url'
+  | 'bio'
+  | 'locale'
+  | 'timezone'
+  | 'password';
+
+type SaveResult = { status: 'ok' } | { status: 'unauth' } | { status: 'error'; msg: string };
 
 function fmtDateTime(iso: string | null): string {
   if (!iso) return '—';
@@ -72,12 +85,26 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function InfoRow({ label, children }: { label: string; children: ReactNode }) {
+function InfoRow({ label, action, children }: { label: string; action?: ReactNode; children: ReactNode }) {
   return (
     <div className="flex items-start justify-between gap-4 py-2">
       <span className="shrink-0 text-sm text-gray-500">{label}</span>
-      <span className="min-w-0 text-right text-sm text-gray-900">{children}</span>
+      <span className="flex min-w-0 flex-1 items-start justify-end gap-2 text-sm text-gray-900">
+        <span className="min-w-0 break-words text-right">{children}</span>
+        {action}
+      </span>
     </div>
+  );
+}
+
+function EditButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="shrink-0 rounded-md border border-[#e2e2e2] px-2 py-0.5 text-xs text-gray-500 transition hover:border-gray-400 hover:text-gray-800"
+    >
+      修改
+    </button>
   );
 }
 
@@ -93,39 +120,289 @@ function VerifiedBadge({ verifiedAt }: { verifiedAt: string | null }) {
   );
 }
 
-export default function ProfileView({ auth, profile: initial, onUnauthorized }: Props) {
-  const [profile, setProfile] = useState<MeProfile>(initial);
+// 通用编辑弹框外壳；onMouseDown 关闭只在遮罩上生效，框内拖拽选字不会误关。
+function ModalShell({
+  title,
+  onClose,
+  onSubmit,
+  busy,
+  error,
+  submitLabel = '保存',
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  onSubmit: (e: FormEvent) => void;
+  busy: boolean;
+  error: string;
+  submitLabel?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
+      onMouseDown={onClose}
+    >
+      <form
+        onSubmit={onSubmit}
+        className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-base font-semibold text-gray-900">{title}</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="关闭"
+            className="text-gray-400 transition hover:text-gray-700"
+          >
+            ✕
+          </button>
+        </div>
+        {children}
+        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+        <div className="mt-5 flex gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex-1 rounded-lg border border-[#e2e2e2] px-3 py-2 text-sm text-gray-700 transition hover:bg-gray-50"
+          >
+            取消
+          </button>
+          <button type="submit" disabled={busy} className={`${submitClass} flex-1`}>
+            {busy ? '提交中…' : submitLabel}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
 
-  // 资料编辑卡（表单每次全量提交 7 个字段，后端变更检测兜底）
-  const [email, setEmail] = useState(initial.email ?? '');
-  const [phone, setPhone] = useState(initial.phone ?? '');
-  const [displayName, setDisplayName] = useState(initial.display_name ?? '');
-  const [avatarUrl, setAvatarUrl] = useState(initial.avatar_url ?? '');
-  const [bio, setBio] = useState(initial.bio ?? '');
-  const [locale, setLocale] = useState(initial.locale);
-  const [timezone, setTimezone] = useState(initial.timezone);
-  const [profileBusy, setProfileBusy] = useState(false);
-  const [profileError, setProfileError] = useState('');
-  const [profileSaved, setProfileSaved] = useState(false);
+// onSave 成功时由父组件关弹框（setEditing(null)），这里只在失败时留框显示错误。
+function TextFieldEditor({
+  title,
+  label,
+  initial,
+  inputType = 'text',
+  multiline = false,
+  placeholder,
+  maxLength,
+  validate,
+  onSave,
+  onClose,
+}: {
+  title: string;
+  label: string;
+  initial: string;
+  inputType?: 'text' | 'email' | 'tel' | 'url';
+  multiline?: boolean;
+  placeholder?: string;
+  maxLength?: number;
+  validate?: (v: string) => string | null;
+  onSave: (v: string) => Promise<SaveResult>;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
-  // 修改密码卡
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setError('');
+    const v = value.trim();
+    const bad = validate ? validate(v) : null;
+    if (bad) {
+      setError(bad);
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await onSave(v);
+      if (res.status === 'error') setError(res.msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <ModalShell title={title} onClose={onClose} onSubmit={submit} busy={busy} error={error}>
+      <Field label={label}>
+        {multiline ? (
+          <textarea
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            rows={4}
+            maxLength={maxLength}
+            placeholder={placeholder}
+            className={`${inputClass} resize-y`}
+          />
+        ) : (
+          <input
+            type={inputType}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            maxLength={maxLength}
+            placeholder={placeholder}
+            className={inputClass}
+          />
+        )}
+      </Field>
+    </ModalShell>
+  );
+}
+
+function SelectEditor({
+  title,
+  label,
+  options,
+  initial,
+  onSave,
+  onClose,
+}: {
+  title: string;
+  label: string;
+  options: string[];
+  initial: string;
+  onSave: (v: string) => Promise<SaveResult>;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      const res = await onSave(value);
+      if (res.status === 'error') setError(res.msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <ModalShell title={title} onClose={onClose} onSubmit={submit} busy={busy} error={error}>
+      <Field label={label}>
+        <select
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          className={inputClass}
+        >
+          {options.map((v) => (
+            <option key={v} value={v}>
+              {v}
+            </option>
+          ))}
+        </select>
+      </Field>
+    </ModalShell>
+  );
+}
+
+function PasswordEditor({
+  onSave,
+  onClose,
+}: {
+  onSave: (current: string, next: string) => Promise<SaveResult>;
+  onClose: () => void;
+}) {
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
   const [confirm, setConfirm] = useState('');
-  const [pwBusy, setPwBusy] = useState(false);
-  const [pwError, setPwError] = useState('');
-  const [pwDone, setPwDone] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setError('');
+    if (!current) {
+      setError('请输入当前密码');
+      return;
+    }
+    if (next.length < 8) {
+      setError('新密码至少 8 位');
+      return;
+    }
+    if (new TextEncoder().encode(next).length > 72) {
+      setError('新密码不能超过 72 字节（中文每字约 3 字节）');
+      return;
+    }
+    if (confirm !== next) {
+      setError('两次输入的新密码不一致');
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await onSave(current, next);
+      if (res.status === 'error') setError(res.msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <ModalShell
+      title="修改密码"
+      onClose={onClose}
+      onSubmit={submit}
+      busy={busy}
+      error={error}
+      submitLabel="修改密码"
+    >
+      <div className="space-y-4">
+        <Field label="当前密码">
+          <input
+            type="password"
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+            autoComplete="current-password"
+            className={inputClass}
+          />
+        </Field>
+        <Field label="新密码">
+          <input
+            type="password"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            autoComplete="new-password"
+            className={inputClass}
+            placeholder="至少 8 位，不超过 72 字节"
+          />
+        </Field>
+        <Field label="确认新密码">
+          <input
+            type="password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            autoComplete="new-password"
+            className={inputClass}
+          />
+        </Field>
+      </div>
+    </ModalShell>
+  );
+}
+
+export default function ProfileView({ auth, profile: initial, onUnauthorized }: Props) {
+  const [profile, setProfile] = useState<MeProfile>(initial);
+  const [editing, setEditing] = useState<EditKey | null>(null);
+  const [flash, setFlash] = useState('');
   const [copied, setCopied] = useState(false);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  function syncForm(p: MeProfile) {
-    setEmail(p.email ?? '');
-    setPhone(p.phone ?? '');
-    setDisplayName(p.display_name ?? '');
-    setAvatarUrl(p.avatar_url ?? '');
-    setBio(p.bio ?? '');
-    setLocale(p.locale);
-    setTimezone(p.timezone);
+  useEffect(
+    () => () => {
+      if (flashTimer.current) clearTimeout(flashTimer.current);
+    },
+    [],
+  );
+
+  function showFlash(msg: string) {
+    if (flashTimer.current) clearTimeout(flashTimer.current);
+    setFlash(msg);
+    flashTimer.current = setTimeout(() => setFlash(''), 4000);
   }
 
   async function copyId() {
@@ -138,82 +415,43 @@ export default function ProfileView({ auth, profile: initial, onUnauthorized }: 
     }
   }
 
-  async function submitProfile(e: FormEvent) {
-    e.preventDefault();
-    setProfileError('');
-    setProfileSaved(false);
-    const emailTrim = email.trim();
-    const phoneTrim = phone.trim();
-    if (emailTrim && !EMAIL_RE.test(emailTrim)) {
-      setProfileError('邮箱格式不正确');
-      return;
+  // PATCH 是 exclude_unset 语义：只发当前这一个键，其余字段不动。
+  async function saveField(patch: MePatch): Promise<SaveResult> {
+    const res = await patchMe(auth.token, patch);
+    if (res.ok) {
+      setProfile(res.data);
+      setEditing(null);
+      showFlash('修改成功');
+      return { status: 'ok' };
     }
-    if (phoneTrim && !PHONE_RE.test(phoneTrim)) {
-      setProfileError('手机号格式不正确');
-      return;
+    if (res.status === 401) {
+      onUnauthorized();
+      return { status: 'unauth' };
     }
-    setProfileBusy(true);
-    try {
-      const res = await patchMe(auth.token, {
-        email: emailTrim || null,
-        phone: phoneTrim || null,
-        display_name: displayName.trim() || null,
-        avatar_url: avatarUrl.trim() || null,
-        bio: bio.trim() || null,
-        locale,
-        timezone,
-      });
-      if (res.ok) {
-        setProfile(res.data);
-        syncForm(res.data); // pick up server-canonical email/phone forms
-        setProfileSaved(true);
-      } else if (res.status === 401) {
-        onUnauthorized();
-      } else {
-        setProfileError(mapError(res.status, res.error));
-      }
-    } finally {
-      setProfileBusy(false);
-    }
+    return { status: 'error', msg: mapError(res.status, res.error) };
   }
 
-  async function submitPassword(e: FormEvent) {
-    e.preventDefault();
-    setPwError('');
-    setPwDone(false);
-    if (next.length < 8) {
-      setPwError('新密码至少 8 位');
-      return;
+  async function savePassword(currentPw: string, nextPw: string): Promise<SaveResult> {
+    const res = await changePassword(auth.token, currentPw, nextPw);
+    if (res.ok) {
+      setEditing(null);
+      showFlash('密码修改成功，其他设备的登录已失效');
+      return { status: 'ok' };
     }
-    if (new TextEncoder().encode(next).length > 72) {
-      setPwError('新密码不能超过 72 字节（中文每字约 3 字节）');
-      return;
+    if (res.status === 401) {
+      onUnauthorized();
+      return { status: 'unauth' };
     }
-    if (confirm !== next) {
-      setPwError('两次输入的新密码不一致');
-      return;
-    }
-    setPwBusy(true);
-    try {
-      const res = await changePassword(auth.token, current, next);
-      if (res.ok) {
-        setCurrent('');
-        setNext('');
-        setConfirm('');
-        setPwDone(true);
-      } else if (res.status === 401) {
-        onUnauthorized();
-      } else {
-        setPwError(mapError(res.status, res.error));
-      }
-    } finally {
-      setPwBusy(false);
-    }
+    return { status: 'error', msg: mapError(res.status, res.error) };
   }
 
-  // 兜底：库里存过选项之外的值时仍要能显示并保存
-  const localeOptions = LOCALES.includes(locale) ? LOCALES : [locale, ...LOCALES];
-  const tzOptions = TIMEZONES.includes(timezone) ? TIMEZONES : [timezone, ...TIMEZONES];
+  // 兜底：库里存过选项之外的值时弹框里仍要能显示并保存
+  const localeOptions = LOCALES.includes(profile.locale)
+    ? LOCALES
+    : [profile.locale, ...LOCALES];
+  const tzOptions = TIMEZONES.includes(profile.timezone)
+    ? TIMEZONES
+    : [profile.timezone, ...TIMEZONES];
 
   const statusLabel: Record<string, string> = {
     active: '正常',
@@ -222,10 +460,17 @@ export default function ProfileView({ auth, profile: initial, onUnauthorized }: 
     deleted: '已注销',
   };
   const statusActive = profile.status === 'active';
+  const unset = <span className="text-gray-400">未设置</span>;
 
   return (
     <div className="mx-auto w-full max-w-2xl space-y-6 pb-16">
-      {/* 账号信息（只读） */}
+      {flash && (
+        <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-2 text-sm text-green-700">
+          {flash}
+        </div>
+      )}
+
+      {/* 统一展示：每个字段只出现一次；可修改字段右侧带“修改”按钮，点击弹出编辑框 */}
       <section className={cardClass}>
         <h2 className="mb-3 text-base font-semibold text-gray-900">账号信息</h2>
         <div className="divide-y divide-[#f2f2f2]">
@@ -258,149 +503,126 @@ export default function ProfileView({ auth, profile: initial, onUnauthorized }: 
               <span className="ml-2 text-xs text-gray-400">IP {profile.last_login_ip}</span>
             )}
           </InfoRow>
-          <InfoRow label="邮箱">
+          <InfoRow label="邮箱" action={<EditButton onClick={() => setEditing('email')} />}>
             {profile.email ?? <span className="text-gray-400">未绑定</span>}
             <VerifiedBadge verifiedAt={profile.email_verified_at} />
           </InfoRow>
-          <InfoRow label="手机号">
+          <InfoRow label="手机号" action={<EditButton onClick={() => setEditing('phone')} />}>
             {profile.phone ?? <span className="text-gray-400">未绑定</span>}
             <VerifiedBadge verifiedAt={profile.phone_verified_at} />
           </InfoRow>
+          <InfoRow
+            label="昵称"
+            action={<EditButton onClick={() => setEditing('display_name')} />}
+          >
+            {profile.display_name ?? unset}
+          </InfoRow>
+          <InfoRow
+            label="头像 URL"
+            action={<EditButton onClick={() => setEditing('avatar_url')} />}
+          >
+            {profile.avatar_url ?? unset}
+          </InfoRow>
+          <InfoRow label="个人简介" action={<EditButton onClick={() => setEditing('bio')} />}>
+            {profile.bio ?? unset}
+          </InfoRow>
+          <InfoRow label="语言" action={<EditButton onClick={() => setEditing('locale')} />}>
+            {profile.locale}
+          </InfoRow>
+          <InfoRow label="时区" action={<EditButton onClick={() => setEditing('timezone')} />}>
+            {profile.timezone}
+          </InfoRow>
+          <InfoRow label="密码" action={<EditButton onClick={() => setEditing('password')} />}>
+            <span className="text-gray-500">已设置</span>
+          </InfoRow>
         </div>
         <p className="mt-3 text-xs text-gray-400">
-          用户名与状态不可自助修改；修改邮箱或手机号后验证状态会重置为未验证。
+          用户名与状态不可自助修改；各字段通过“修改”按钮单独保存；修改邮箱或手机号后验证状态会重置为未验证。
         </p>
       </section>
 
-      {/* 资料编辑 */}
-      <section className={cardClass}>
-        <h2 className="mb-4 text-base font-semibold text-gray-900">资料编辑</h2>
-        <form onSubmit={submitProfile} className="space-y-4">
-          <Field label="邮箱">
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              autoComplete="email"
-              className={inputClass}
-              placeholder="留空表示不绑定"
-            />
-          </Field>
-          <Field label="手机号">
-            <input
-              type="tel"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              autoComplete="tel"
-              className={inputClass}
-              placeholder="默认中国大陆 +86，留空表示不绑定"
-            />
-          </Field>
-          <Field label="昵称">
-            <input
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              maxLength={100}
-              className={inputClass}
-              placeholder="显示名称（选填）"
-            />
-          </Field>
-          <Field label="头像 URL">
-            <input
-              type="url"
-              value={avatarUrl}
-              onChange={(e) => setAvatarUrl(e.target.value)}
-              className={inputClass}
-              placeholder="https://… （暂不支持上传）"
-            />
-          </Field>
-          <Field label="个人简介">
-            <textarea
-              value={bio}
-              onChange={(e) => setBio(e.target.value)}
-              rows={3}
-              maxLength={5000}
-              className={`${inputClass} resize-y`}
-              placeholder="关于你（选填）"
-            />
-          </Field>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <Field label="语言">
-              <select
-                value={locale}
-                onChange={(e) => setLocale(e.target.value)}
-                className={inputClass}
-              >
-                {localeOptions.map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="时区">
-              <select
-                value={timezone}
-                onChange={(e) => setTimezone(e.target.value)}
-                className={inputClass}
-              >
-                {tzOptions.map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          </div>
-          {profileError && <p className="text-sm text-red-600">{profileError}</p>}
-          {profileSaved && !profileError && <p className="text-sm text-green-700">保存成功</p>}
-          <button type="submit" disabled={profileBusy} className={submitClass}>
-            {profileBusy ? '保存中…' : '保存资料'}
-          </button>
-        </form>
-      </section>
-
-      {/* 修改密码 */}
-      <section className={cardClass}>
-        <h2 className="mb-4 text-base font-semibold text-gray-900">修改密码</h2>
-        <form onSubmit={submitPassword} className="space-y-4">
-          <Field label="当前密码">
-            <input
-              type="password"
-              value={current}
-              onChange={(e) => setCurrent(e.target.value)}
-              autoComplete="current-password"
-              className={inputClass}
-            />
-          </Field>
-          <Field label="新密码">
-            <input
-              type="password"
-              value={next}
-              onChange={(e) => setNext(e.target.value)}
-              autoComplete="new-password"
-              className={inputClass}
-              placeholder="至少 8 位，不超过 72 字节"
-            />
-          </Field>
-          <Field label="确认新密码">
-            <input
-              type="password"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              autoComplete="new-password"
-              className={inputClass}
-            />
-          </Field>
-          {pwError && <p className="text-sm text-red-600">{pwError}</p>}
-          {pwDone && !pwError && (
-            <p className="text-sm text-green-700">修改成功，其他设备的登录已失效</p>
-          )}
-          <button type="submit" disabled={pwBusy} className={submitClass}>
-            {pwBusy ? '请稍候…' : '修改密码'}
-          </button>
-        </form>
-      </section>
+      {editing === 'email' && (
+        <TextFieldEditor
+          title="修改邮箱"
+          label="邮箱"
+          inputType="email"
+          initial={profile.email ?? ''}
+          placeholder="留空表示解绑"
+          validate={(v) => (v && !EMAIL_RE.test(v) ? '邮箱格式不正确' : null)}
+          onSave={(v) => saveField({ email: v || null })}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      {editing === 'phone' && (
+        <TextFieldEditor
+          title="修改手机号"
+          label="手机号"
+          inputType="tel"
+          initial={profile.phone ?? ''}
+          placeholder="默认中国大陆 +86，留空表示解绑"
+          validate={(v) => (v && !PHONE_RE.test(v) ? '手机号格式不正确' : null)}
+          onSave={(v) => saveField({ phone: v || null })}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      {editing === 'display_name' && (
+        <TextFieldEditor
+          title="修改昵称"
+          label="昵称"
+          initial={profile.display_name ?? ''}
+          maxLength={100}
+          placeholder="显示名称（选填），留空表示清除"
+          onSave={(v) => saveField({ display_name: v || null })}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      {editing === 'avatar_url' && (
+        <TextFieldEditor
+          title="修改头像 URL"
+          label="头像 URL"
+          inputType="url"
+          initial={profile.avatar_url ?? ''}
+          maxLength={2048}
+          placeholder="https://… （暂不支持上传），留空表示清除"
+          onSave={(v) => saveField({ avatar_url: v || null })}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      {editing === 'bio' && (
+        <TextFieldEditor
+          title="修改个人简介"
+          label="个人简介"
+          initial={profile.bio ?? ''}
+          multiline
+          maxLength={5000}
+          placeholder="关于你（选填），留空表示清除"
+          onSave={(v) => saveField({ bio: v || null })}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      {editing === 'locale' && (
+        <SelectEditor
+          title="修改语言"
+          label="语言"
+          options={localeOptions}
+          initial={profile.locale}
+          onSave={(v) => saveField({ locale: v })}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      {editing === 'timezone' && (
+        <SelectEditor
+          title="修改时区"
+          label="时区"
+          options={tzOptions}
+          initial={profile.timezone}
+          onSave={(v) => saveField({ timezone: v })}
+          onClose={() => setEditing(null)}
+        />
+      )}
+      {editing === 'password' && (
+        <PasswordEditor onSave={savePassword} onClose={() => setEditing(null)} />
+      )}
     </div>
   );
 }
