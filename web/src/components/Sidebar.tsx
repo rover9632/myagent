@@ -9,6 +9,7 @@ type Props = {
   activeId: string | null;
   streamingIds: Set<string>;
   username: string;
+  displayName: string | null;
   onNew: () => void;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
@@ -20,11 +21,13 @@ export default function Sidebar({
   activeId,
   streamingIds,
   username,
+  displayName,
   onNew,
   onSelect,
   onDelete,
   onLogout,
 }: Props) {
+  const label = displayName?.trim() ? displayName : username;
   return (
     <aside className="flex w-64 shrink-0 flex-col border-r border-[#ececec] bg-[#f9f9f9]">
       <div className="px-4 pb-2 pt-5">
@@ -80,8 +83,8 @@ export default function Sidebar({
       </nav>
 
       <div className="flex items-center justify-between border-t border-[#ececec] px-4 py-3">
-        <span className="truncate text-sm text-gray-600" title={username}>
-          {username}
+        <span className="truncate text-sm text-gray-600" title={label}>
+          {label}
         </span>
         <span className="flex shrink-0 items-center gap-3">
           <Link

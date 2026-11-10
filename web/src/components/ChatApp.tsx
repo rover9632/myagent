@@ -6,6 +6,7 @@ import ChatWindow from '@/components/ChatWindow';
 import Sidebar from '@/components/Sidebar';
 import { useChat } from '@/hooks/useChat';
 import type { Auth } from '@/lib/auth';
+import { getMe } from '@/lib/me';
 
 type Props = {
   auth: Auth;
@@ -20,6 +21,20 @@ export default function ChatApp({ auth, onUnauthorized, onLogout }: Props) {
   // null = unknown; the proxy validates before touching upstream, so an empty
   // body returns 422 when configured vs 500 "backend not configured".
   const [configured, setConfigured] = useState<boolean | null>(null);
+  // Cosmetic only: the sidebar shows display_name when set, else the username.
+  // Failures (incl. 401) silently keep the username — page.tsx already probes
+  // the session, and real auth errors surface through the chat/stream calls.
+  const [displayName, setDisplayName] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    getMe(auth.token).then((res) => {
+      if (alive && res.ok) setDisplayName(res.data.display_name);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [auth.token]);
 
   useEffect(() => {
     let alive = true;
@@ -46,6 +61,7 @@ export default function ChatApp({ auth, onUnauthorized, onLogout }: Props) {
         activeId={chat.activeThread?.id ?? null}
         streamingIds={chat.streamingIds}
         username={auth.username}
+        displayName={displayName}
         onNew={chat.newChat}
         onSelect={chat.selectThread}
         onDelete={chat.deleteThread}
