@@ -1,17 +1,28 @@
 from __future__ import annotations
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import ModelRequest, dynamic_prompt
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
-from app.agent.prompts import SYSTEM_PROMPT
+from app.agent.prompts import SYSTEM_PROMPT, compose_system_prompt
 from app.config import Settings
+from app.context import get_user_profile
 from app.sandbox import DockerSandbox
 from app.tools.execution import build_execution_tools
 from app.tools.genpass import build_genpass_tools
 from app.tools.imgs2pdf import build_imgs2pdf_tools
 from app.tools.pdf2imgs import build_pdf2imgs_tools
 from app.tools.web import build_web_tools
+
+
+@dynamic_prompt
+def profiled_system_prompt(request: ModelRequest) -> str:
+    """Per-model-call system prompt: base + the profile block AgentService
+    bound to this request's context (same contextvars pattern as the tools).
+    Unbound/no profile falls back to plain SYSTEM_PROMPT, so nothing about
+    history or the static prompt changes."""
+    return compose_system_prompt(get_user_profile())
 
 
 def build_agent(
@@ -48,6 +59,9 @@ def build_agent(
     return create_agent(
         model=model,
         tools=tools,
+        # Static base for anything that inspects the graph without the
+        # middleware; every real model call gets the composed prompt below.
         system_prompt=SYSTEM_PROMPT,
+        middleware=[profiled_system_prompt],
         checkpointer=checkpointer,
     )

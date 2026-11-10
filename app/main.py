@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
     agent = build_agent(settings, sandbox, checkpointer)
     app.state.pool = pool
     app.state.user_store = user_store
-    app.state.agent_service = AgentService(agent)
+    app.state.agent_service = AgentService(agent, user_store)
     app.state.sandbox = sandbox
     logger.info("Agent ready: model=%s base_url=%s", settings.llm_model, settings.llm_base_url)
 

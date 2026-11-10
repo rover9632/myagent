@@ -76,6 +76,29 @@ class MeData:
     timezone: str
 
 
+@dataclass(frozen=True, slots=True)
+class ProfileSnapshot:
+    """Per-user facts injected into the agent's system prompt for one stream.
+
+    Deliberately excludes anything secret or audit-only: ``password_hash``,
+    ``last_login_ip``, ``deleted_at``, ``status`` and the ``*_verified_at``
+    stamps. ``email``/``phone`` are in because the user may legitimately ask
+    the agent about their own contact info; everything user-editable
+    (display_name/bio/attributes) is rendered as *data*, never as instructions
+    (see ``app.agent.prompts.format_user_profile``).
+    """
+
+    username: str
+    display_name: str | None
+    bio: str | None
+    locale: str
+    timezone: str
+    attributes: dict[str, Any]
+    email: str | None
+    phone: str | None
+    created_at: datetime | None
+
+
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -338,6 +361,46 @@ class UserStore:
             bio=prof.bio if prof else None,
             locale=prof.locale if prof else "zh-CN",
             timezone=prof.timezone if prof else "Asia/Shanghai",
+        )
+
+    async def profile_snapshot(self, username: str) -> ProfileSnapshot | None:
+        """Read the agent-prompt view of a user (users + optional user_profiles row).
+
+        One outer-join read per chat stream — a missing profile row synthesizes
+        the ORM column defaults, mirroring ``get_me``. Lookup is by
+        ``lower(username)`` so the functional unique index serves it; None when
+        the user row vanished (the stream then simply carries no profile).
+        """
+        stmt = (
+            select(
+                UserORM.username,
+                UserORM.email,
+                UserORM.phone,
+                UserORM.created_at,
+                UserProfile.display_name,
+                UserProfile.bio,
+                UserProfile.locale,
+                UserProfile.timezone,
+                UserProfile.attributes,
+            )
+            .outerjoin(UserProfile, UserProfile.user_id == UserORM.id)
+            .where(func.lower(UserORM.username) == func.lower(username))
+            .limit(1)
+        )
+        async with self.sessionmaker() as session:
+            row = (await session.execute(stmt)).first()
+        if row is None:
+            return None
+        return ProfileSnapshot(
+            username=row.username,
+            display_name=row.display_name,
+            bio=row.bio,
+            locale=row.locale if row.locale is not None else "zh-CN",
+            timezone=row.timezone if row.timezone is not None else "Asia/Shanghai",
+            attributes=row.attributes if row.attributes else {},
+            email=row.email,
+            phone=row.phone,
+            created_at=row.created_at,
         )
 
     async def update_me(self, user_id: UUID, changes: Mapping[str, Any]) -> None:

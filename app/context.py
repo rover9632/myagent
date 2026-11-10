@@ -40,3 +40,24 @@ def get_username() -> str:
     if not username:
         raise RuntimeError("No agent username is bound to the current tool execution context")
     return username
+
+
+# Pre-rendered user-profile block for the dynamic system prompt. Unlike the
+# two above this one is OPTIONAL: get returns None when unbound or when the
+# profile fetch failed, and the prompt simply falls back to SYSTEM_PROMPT.
+_current_user_profile: ContextVar[str | None] = ContextVar(
+    "current_user_profile",
+    default=None,
+)
+
+
+def set_user_profile(profile_note: str | None):
+    return _current_user_profile.set(profile_note)
+
+
+def reset_user_profile(token) -> None:
+    _current_user_profile.reset(token)
+
+
+def get_user_profile() -> str | None:
+    return _current_user_profile.get()

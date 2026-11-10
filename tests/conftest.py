@@ -16,6 +16,7 @@ from app.user_store import (
     DuplicatePhone,
     DuplicateUsername,
     MeData,
+    ProfileSnapshot,
     User,
     classify_account,
     ip_str,
@@ -229,6 +230,34 @@ class FakeUserStore:
             locale=prof.get("locale", "zh-CN") if prof else "zh-CN",
             timezone=prof.get("timezone", "Asia/Shanghai") if prof else "Asia/Shanghai",
         )
+
+    async def profile_snapshot(self, username: str) -> ProfileSnapshot | None:
+        # Mirrors UserStore.profile_snapshot: case-insensitive username lookup,
+        # synthesized user_profiles defaults when the row is absent, None for an
+        # unknown user; only non-secret columns ever leave the store.
+        name = self._canonical_username(username)
+        if name is None:
+            return None
+        uid = self.users[name][0]
+        acc = self.accounts.get(uid, {})
+        prof = self.profile_rows.get(uid) or {}
+        return ProfileSnapshot(
+            username=name,
+            display_name=prof.get("display_name"),
+            bio=prof.get("bio"),
+            locale=prof.get("locale", "zh-CN"),
+            timezone=prof.get("timezone", "Asia/Shanghai"),
+            attributes=prof.get("attributes") or {},
+            email=acc.get("email"),
+            phone=acc.get("phone"),
+            created_at=acc.get("created_at"),
+        )
+
+    def _canonical_username(self, username: str) -> str | None:
+        for key in self.users:
+            if key.lower() == username.lower():
+                return key
+        return None
 
     async def update_me(self, user_id: UUID, changes: dict) -> None:
         # Mirrors UserStore.update_me semantics: key present == intended write,

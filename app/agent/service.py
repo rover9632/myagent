@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from app.context import reset_thread_id, reset_username, set_thread_id, set_username
+from app.agent.prompts import format_user_profile
+from app.context import (
+    reset_thread_id,
+    reset_user_profile,
+    reset_username,
+    set_thread_id,
+    set_user_profile,
+    set_username,
+)
 from app.schemas import SSEEvent
+
+logger = logging.getLogger(__name__)
 
 _TOOL_NAMES = {
     "web_search",
@@ -47,8 +58,28 @@ def _truncate_value(value: Any, limit: int = 2000, depth: int = 3) -> Any:
 
 
 class AgentService:
-    def __init__(self, agent) -> None:
+    def __init__(self, agent, user_store=None) -> None:
         self.agent = agent
+        self.user_store = user_store
+
+    async def _profile_note(self, username: str) -> str | None:
+        """Render this user's profile block; None on any failure.
+
+        The profile is a nice-to-have for the turn — a store hiccup or a
+        vanished user must degrade to a prompt without it, never to an SSE
+        error. The dynamic-prompt middleware (app.agent.factory) reads the
+        contextvar set from this result.
+        """
+        if self.user_store is None:
+            return None
+        try:
+            snapshot = await self.user_store.profile_snapshot(username)
+        except Exception:
+            logger.warning("profile snapshot fetch failed for %r", username, exc_info=True)
+            return None
+        if snapshot is None:
+            return None
+        return format_user_profile(snapshot)
 
     async def stream(
         self,
@@ -61,6 +92,9 @@ class AgentService:
     ) -> AsyncIterator[SSEEvent]:
         user_token = set_username(username)
         thread_token = set_thread_id(thread_id)
+        # Bound BEFORE the graph runs so every model call in this turn sees it
+        # (child tasks inherit contextvars); never raises by construction.
+        profile_token = set_user_profile(await self._profile_note(username))
         try:
             yield SSEEvent(
                 type="start",
@@ -154,5 +188,6 @@ class AgentService:
                 data={"thread_id": thread_id},
             )
         finally:
+            reset_user_profile(profile_token)
             reset_thread_id(thread_token)
             reset_username(user_token)
